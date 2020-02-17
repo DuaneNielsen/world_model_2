@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
-from keypoints import models as knn
-#from torch.utils.tensorboard import SummaryWriter
+
+import cma_es
 from tensorboardX import SummaryWriter
 import config
 from torch.distributions import Categorical
@@ -10,17 +10,17 @@ import torchvision.transforms.functional as TVF
 from utils import UniImageViewer, plot_keypoints_on_image
 from keypoints.models import transporter, functional as KF
 from keypoints.ds import datasets as ds
-from keypoints.models import knn
 import gym
 import gym_wrappers
 import torch.multiprocessing as mp
 import numpy as np
-
+import iic.models.mnn
+import iic.models.classifier
+from iic.models.layerbuilder import LayerMetaData
 from cma.cma_es import NaiveCovarianceMatrixAdaptation, SimpleCovarianceMatrixAdaptation, FastCovarianceMatrixAdaptation
+from cma.cma_es import get_policy, load_weights
+from cma.eval import AtariMpEvaluator, AtariSpEvaluator, nop
 
-
-def nop(s_t):
-    return s_t
 
 class Keypoints(nn.Module):
     def __init__(self, transporter_net):
@@ -44,43 +44,19 @@ class KeypointsAndPatches(nn.Module):
         return kp
 
 
-class EvalPacket():
-    def __init__(self, args, datapack, weights, features, depth, render):
-        """
-        Serializable arguments for eval function
-        :param args:
-        :param datapack:
-        :param weights:
-        :param render:
-        """
-        self.args = args
-        self.datapack = datapack
-        self.weights = weights
-        self.render = render
-        self.features = features
-        self.depth = depth
-
-
-def encode(args, datapack, weights, features, depth, render):
-    weights = weights.cpu().numpy()
-    return EvalPacket(args, datapack, weights, features, depth, render)
-
-
-def decode(packet):
-    packet.weights = torch.from_numpy(packet.weights)
-    return packet
-
-
-def call_evaluate(packet):
-    packet = decode(packet)
-    return evaluate(packet.args, packet.weights, packet.features, packet.depth, render=packet.render)
-
-
-def get_policy(features, actions, depth):
-    blocks = []
-    for _ in range(0, depth):
-        blocks += [nn.Linear(features, features), nn.ReLU()]
-    return nn.Sequential(*blocks, nn.Linear(features, actions), nn.Softmax(dim=0))
+def get_action(s, prepro, transform, view, policy, policy_dtype, action_map, device, action_select_mode='argmax'):
+    if prepro:
+        s = prepro(s)
+    s_t = transform(s).unsqueeze(0).to(device)
+    kp = view(s_t)
+    kp = kp.type(policy_dtype)
+    p = policy(kp.flatten())
+    if action_select_mode == 'argmax':
+        a = torch.argmax(p)
+    if action_select_mode == 'sample':
+        a = Categorical(p).sample()
+    a = action_map(a)
+    return a, kp
 
 
 def evaluate(args, weights, features, depth, render=False, record=False):
@@ -92,37 +68,38 @@ def evaluate(args, weights, features, depth, render=False, record=False):
 
     actions = datapack.action_map.size
     policy = get_policy(features, actions, depth)
-    policy = knn.load_weights(policy, weights)
+    policy = load_weights(policy, weights)
     policy = policy.to(args.device)
     policy_dtype = next(policy.parameters()).dtype
 
     video = []
 
     with torch.no_grad():
-
-        def get_action(s, prepro, transform, view, policy, action_map, device, action_select_mode='argmax'):
-            s = prepro(s)
-            s_t = transform(s).unsqueeze(0).type(policy_dtype).to(device)
-            kp = view(s_t)
-            p = policy(kp.flatten())
-            if action_select_mode == 'argmax':
-                a = torch.argmax(p)
-            if action_select_mode == 'sample':
-                a = Categorical(p).sample()
-            a = action_map(a)
-            return a, kp
-
         v = UniImageViewer()
 
-        if args.model_type != 'nop':
-            transporter_net = transporter.make(args, map_device='cpu')
+        if args.transporter_model_type != 'nop':
+            transporter_net = transporter.make(type=args.transporter_model_type,
+                                               in_channels=args.transporter_model_in_channels,
+                                               z_channels=args.transporter_model_z_channels,
+                                               keypoints=args.transporter_model_keypoints,
+                                               map_device='cpu',
+                                               load=args.transporter_model_load)
             view = Keypoints(transporter_net).to(args.device)
 
+            # init iic categorization model
+            encoder, meta = iic.models.mnn.make_layers(args.iic_model_encoder, args.iic_model_type,
+                                                       LayerMetaData((3, 16, 16)))
+            classifier = iic.models.classifier.Classifier(encoder, meta,
+                                                          num_classes=args.iic_model_categories,
+                                                          init=args.iic_model_init).to(args.device)
+
+            checkpoint = torch.load(args.iic_model_load)
+            classifier.load_state_dict(checkpoint['model'])
         else:
             view = nop
 
         s = env.reset()
-        a, kp = get_action(s, datapack.prepro, datapack.transforms, view, policy, datapack.action_map, args.device,
+        a, kp = get_action(s, datapack.prepro, datapack.transforms, view, policy, policy_dtype, datapack.action_map, args.device,
                            action_select_mode=args.policy_action_select_mode)
 
         done = False
@@ -132,11 +109,11 @@ def evaluate(args, weights, features, depth, render=False, record=False):
             s, r, done, i = env.step(a)
             reward += r
 
-            a, kp = get_action(s, datapack.prepro, datapack.transforms, view, policy, datapack.action_map, args.device,
+            a, kp = get_action(s, datapack.prepro, datapack.transforms, view, policy, policy_dtype, datapack.action_map, args.device,
                                action_select_mode=args.policy_action_select_mode)
 
             if render or record:
-                if args.model_keypoints:
+                if args.transporter_model_keypoints:
                     s = datapack.prepro(s)
                     s = TVF.to_tensor(s).unsqueeze(0)
                     s = plot_keypoints_on_image(kp[0], s[0])
@@ -156,42 +133,6 @@ def evaluate(args, weights, features, depth, render=False, record=False):
 
     return reward
 
-
-class AtariEval(object):
-    def __init__(self, args, datapack, policy_features, policy_actions, policy_depth, render=False, record=False):
-        self.args = args
-        self.datapack = datapack
-        self.policy_features = policy_features
-        self.policy_actions = policy_actions
-        self.policy_depth = policy_depth
-        self.render = render
-        self.record = record
-
-
-class AtariMpEvaluator(AtariEval):
-    def __init__(self, args, datapack, policy_features, policy_actions, policy_depth, render=False, record=False):
-        super().__init__(args, datapack, policy_features, policy_actions, policy_depth, render=render, record=record)
-
-    def fitness(self, candidates):
-        weights = torch.unbind(candidates, dim=0)
-
-        worker_args = [encode(self.args, self.datapack, w, self.policy_features, self.policy_depth, self.render) for w in weights]
-
-        with mp.Pool(processes=args.processes) as pool:
-            results = pool.map(call_evaluate, worker_args)
-
-        results = torch.tensor(results)
-        return results
-
-
-class AtariSpEvaluator(AtariEval):
-    def __init__(self, args, datapack, policy_features, policy_actions, policy_depth, render=False, record=False):
-        super().__init__(args, datapack, policy_features, policy_actions, policy_depth, render=render, record=record)
-
-    def fitness(self, weights):
-        return [evaluate(self.args, w, self.policy_features, self.policy_depth, self.render, self.record) for w in torch.unbind(weights, dim=0)]
-
-
 if __name__ == '__main__':
 
     mp.set_start_method('spawn')
@@ -206,15 +147,16 @@ if __name__ == '__main__':
     best_reward = -1e8
     show = False
 
-    if args.model_keypoints:
-        policy_features = args.model_keypoints * 2
+    if args.transporter_model_keypoints and args.iic_model_categories:
+        #policy_features = args.transporter_model_keypoints * 2 + args.iic_model_categories
+        policy_features = args.transporter_model_keypoints * 2
     else:
         policy_features = args.policy_inputs
 
-    N = knn.parameter_count(get_policy(policy_features, args.policy_depth, datapack.action_map.size))
+    N = cma_es.parameter_count(get_policy(policy_features, args.cma_policy_depth, datapack.action_map.size))
 
-    evaluator = AtariMpEvaluator(args, datapack, policy_features, datapack.action_map.size, args.policy_depth)
-    demo = AtariSpEvaluator(args, datapack, policy_features, datapack.action_map.size, args.policy_depth,
+    evaluator = AtariMpEvaluator(evaluate, args.cma_workers, args, datapack, policy_features, datapack.action_map.size, args.cma_policy_depth)
+    demo = AtariSpEvaluator(evaluate, args, datapack, policy_features, datapack.action_map.size, args.cma_policy_depth,
                             render=args.display, record=True)
 
     if args.cma_algo == 'fast':
@@ -250,8 +192,8 @@ if __name__ == '__main__':
         if ranked_results[0]['fitness'] > best_reward:
             best_reward = ranked_results[0]['fitness']
             torch.save(ranked_results[0]['parameters'], log_dir + 'best_of_generation.pt')
-            _p = get_policy(policy_features, datapack.action_map.size, args.policy_depth)
-            _p = knn.load_weights(_p, weights=ranked_results[0]['parameters'])
+            _p = get_policy(policy_features, datapack.action_map.size, args.cma_policy_depth)
+            _p = cma_es.load_weights(_p, weights=ranked_results[0]['parameters'])
             torch.save(_p.state_dict(), log_dir + 'best_policy.mdl')
             show = True
 

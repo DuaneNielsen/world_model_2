@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="ProjectModuleManager">
+    <modules>
+      <module fileurl="file://$PROJECT_DIR$/../cma-es/.idea/cma-es.iml" filepath="$PROJECT_DIR$/../cma-es/.idea/cma-es.iml" />
+      <module fileurl="file://$PROJECT_DIR$/../iic/.idea/iic.iml" filepath="$PROJECT_DIR$/../iic/.idea/iic.iml" />
+      <module fileurl="file://$PROJECT_DIR$/../keypoints/.idea/keypoints.iml" filepath="$PROJECT_DIR$/../keypoints/.idea/keypoints.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/world_model_2.iml" filepath="$PROJECT_DIR$/.idea/world_model_2.iml" />
+    </modules>
+  </component>
+</project>

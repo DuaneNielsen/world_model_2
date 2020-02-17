@@ -2,6 +2,8 @@ import yaml
 import argparse
 from pathlib import Path
 import torch
+import collections
+import re
 
 
 def config(args=None):
@@ -33,6 +35,7 @@ def config(args=None):
     parser.add_argument('--cma_initial_step_size', type=float, default=None)
     parser.add_argument('--cma_samples', type=int, default=None)
     parser.add_argument('--cma_oversample', type=int)
+    parser.add_argument('--cma_load', type=str)
 
     """ visualization params """
     parser.add_argument('--display', action='store_true')
@@ -70,6 +73,16 @@ def config(args=None):
 
     args = parser.parse_args(args)
 
+    def flatten(d, parent_key='', sep='_'):
+        items = []
+        for k, v in d.items():
+            new_key = parent_key + sep + k if parent_key else k
+            if isinstance(v, collections.MutableMapping):
+                items.extend(flatten(v, new_key, sep=sep).items())
+            else:
+                items.append((new_key, v))
+        return dict(items)
+
     def set_if_not_set(args, dict):
         for key, value in dict.items():
             if key in vars(args) and vars(args)[key] is None:
@@ -78,9 +91,26 @@ def config(args=None):
                 vars(args)[key] = dict[key]
         return args
 
+    """ 
+    required due to https://github.com/yaml/pyyaml/issues/173
+    pyyaml does not correctly parse scientific notation 
+    """
+    loader = yaml.SafeLoader
+    loader.add_implicit_resolver(
+        u'tag:yaml.org,2002:float',
+        re.compile(u'''^(?:
+         [-+]?(?:[0-9][0-9_]*)\\.[0-9_]*(?:[eE][-+]?[0-9]+)?
+        |[-+]?(?:[0-9][0-9_]*)(?:[eE][-+]?[0-9]+)
+        |\\.[0-9_]+(?:[eE][-+][0-9]+)?
+        |[-+]?[0-9][0-9_]*(?::[0-5]?[0-9])+\\.[0-9_]*
+        |[-+]?\\.(?:inf|Inf|INF)
+        |\\.(?:nan|NaN|NAN))$''', re.X),
+        list(u'-+0123456789.'))
+
     if args.config is not None:
         with Path(args.config).open() as f:
             conf = yaml.load(f, Loader=yaml.FullLoader)
+            conf = flatten(conf)
             args = set_if_not_set(args, conf)
 
     defaults = {
@@ -91,14 +121,14 @@ def config(args=None):
 
         'transporter_combine_mode': 'max',
 
-        'processes': 7,
+        'cma_workers': 4,
         'cma_algo;': 'fast',
         'cma_step_mode': 'auto',
         'cma_step_decay': 0.001,
         'cma_oversample': 0,
 
         'policy_action_select_mode': 'argmax',
-        'policy_depth': 1
+        'cma_policy_depth': 1
     }
 
     args = set_if_not_set(args, defaults)
