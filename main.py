@@ -1,11 +1,18 @@
 import glfw
-from OpenGL.GL import *
 from OpenGL.GL.shaders import compileProgram, compileShader
+from OpenGL.GL import GL_VERTEX_SHADER, GL_FRAGMENT_SHADER, GL_ARRAY_BUFFER, GL_STATIC_DRAW, glGenBuffers, glBufferData, \
+    glBindBuffer, glEnableVertexAttribArray, GL_ELEMENT_ARRAY_BUFFER, glVertexAttribPointer, GL_FLOAT, GL_FALSE, \
+    glGenTextures, glBindTexture, GL_TEXTURE_2D, glTexParameter, GL_TEXTURE_WRAP_S, GL_TEXTURE_WRAP_T, glTexParameteri, \
+    GL_CLAMP_TO_EDGE, GL_TEXTURE_MIN_FILTER, GL_TEXTURE_MAG_FILTER, GL_LINEAR, glUseProgram, glClearColor, glEnable, \
+    GL_DEPTH_TEST, GL_BLEND, glBlendFunc, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, glGetUniformLocation, glGetInteger, \
+    GL_CURRENT_PROGRAM, glRasterPos3d, GL_CURRENT_RASTER_POSITION, GL_RGB, GL_UNSIGNED_BYTE, glClear, \
+    GL_COLOR_BUFFER_BIT, GL_NEAREST, glViewport, glTexImage2D, glUniformMatrix4fv, glDrawElements, GL_TRIANGLES, \
+    GL_UNSIGNED_INT, glDrawPixels, glReadPixels, GL_RGBA, GL_DEPTH_BUFFER_BIT, glUniform4fv, GL_QUADS
+import ctypes
 import numpy as np
 import pyrr
 import gym
 import pygame
-
 
 import keypoints
 from keypoints.models import transporter
@@ -22,11 +29,28 @@ from iic.models.layerbuilder import LayerMetaData
 import torch.nn.functional as F
 from torchvision.transforms.functional import to_tensor
 from cma.cma_es import get_policy
-from train_cma import get_action
+# from train_cma import get_action
+from train_cma import view, get_action
+from torch.distributions import Categorical
+
+#
+# def get_action(s, prepro, transform, view, policy, policy_dtype, action_map, device, action_select_mode='argmax'):
+#     if prepro:
+#         s = prepro(s)
+#     s_t = transform(s).unsqueeze(0).to(device)
+#     kp = view(s_t)
+#     kp = kp.type(policy_dtype)
+#
+#     p = policy(torch.cat((torch.zeros(3).to(args.device), kp.flatten())))
+#     if action_select_mode == 'argmax':
+#         a = torch.argmax(p)
+#     if action_select_mode == 'sample':
+#         a = Categorical(p).sample()
+#     a = action_map(a)
+#     return a, kp
 
 
 viewer = UniImageViewer()
-
 
 pygame.init()
 
@@ -371,7 +395,7 @@ color_loc = glGetUniformLocation(white_shader, "uColor")
 env = gym.make('Pong-v0')
 env.reset()
 
-args = config.config(['--config', './configs/baseline.yaml'])
+args = config.config(['--config', './configs/baseline_mini.yaml', '--device', 'cuda:1'])
 datapack = keypoints.ds.datasets.datasets[args.dataset]
 
 # init transporter keypoint network
@@ -382,24 +406,18 @@ transporter_net = transporter.make(type=args.transporter_model_type,
                                    map_device='cpu',
                                    load=args.transporter_model_load)
 transporter_net.eval().to(args.device)
-view = train_cma.Keypoints(transporter_net)
+kp_net = train_cma.Keypoints(transporter_net)
 
 # init iic categorization model
 encoder, meta = iic.models.mnn.make_layers(args.iic_model_encoder, args.iic_model_type, LayerMetaData((3, 16, 16)))
 classifier = iic.models.classifier.Classifier(encoder, meta, num_classes=6,
-                                              init=args.iic_model_init).to(
-    args.device)
+                                              init=args.iic_model_init).to(args.device)
 
 checkpoint = torch.load(args.iic_model_load)
 classifier.load_state_dict(checkpoint['model'])
 classifier.eval()
 
-# init policy
-if args.transporter_model_keypoints and args.iic_model_categories:
-    # policy_features = args.transporter_model_keypoints * 2 + args.iic_model_categories
-    policy_features = args.transporter_model_keypoints * 2
-else:
-    policy_features = args.policy_inputs
+policy_features = args.cma_policy_features
 
 actions = datapack.action_map.size
 policy = get_policy(policy_features, actions, args.cma_policy_depth)
@@ -457,9 +475,14 @@ imageid = 0
 action = env.action_space.sample()
 
 s = env.reset()
-a, kp = get_action(s, None, datapack.transforms, view, policy, policy_dtype, datapack.action_map,
-                   args.device,
-                   action_select_mode=args.policy_action_select_mode)
+
+
+# a, _ = get_action(s, None, datapack.transforms, kp_net, policy, policy_dtype, datapack.action_map,
+#                    args.device,
+#                    action_select_mode=args.policy_action_select_mode)
+with torch.no_grad():
+    z, kp, categories, patch, kvp = view(s, kp_net, classifier, args.device, args.iic_model_labels, invert_y=True)
+    a = get_action(z, policy, datapack.action_map)
 
 # the main application loop
 while not glfw.window_should_close(window):
@@ -469,7 +492,13 @@ while not glfw.window_should_close(window):
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
 
     # take a step in the environment
-    image_data, r, done, info = env.step(action)
+    # image_data, r, done, info = env.step(action)
+    image_data, r, done, info = env.step(env.action_space.sample())
+
+    with torch.no_grad():
+        z, kp, categories, patch, kvp = view(image_data, kp_net, classifier, args.device, args.iic_model_labels, invert_y=True)
+        a = get_action(z, policy, datapack.action_map)
+
     glBindTexture(GL_TEXTURE_2D, texture)
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, image_data.shape[1], image_data.shape[0], 0, GL_RGB, GL_UNSIGNED_BYTE,
                  image_data)
@@ -497,11 +526,11 @@ while not glfw.window_should_close(window):
     buffer = glReadPixels(anchor['kp_input'].x, anchor['kp_input'].y, 32, 32, format=GL_RGB, type=GL_UNSIGNED_BYTE)
     pixel_array = np.frombuffer(buffer, dtype=np.uint8).reshape(32, 32, 3)
     # viewer.render(pixel_array)
-    with torch.no_grad():
-        #s_t = datapack.transforms(pixel_array).unsqueeze(0).to(args.device)
-        a, kp = get_action(pixel_array, None, datapack.transforms, view, policy, policy_dtype, datapack.action_map,
-                           args.device,
-                           action_select_mode=args.policy_action_select_mode)
+    #with torch.no_grad():
+    #     # s_t = datapack.transforms(pixel_array).unsqueeze(0).to(args.device)
+    #     a, _ = get_action(pixel_array, None, datapack.transforms, kp_net, policy, policy_dtype, datapack.action_map,
+    #                        args.device,
+    #                        action_select_mode=args.policy_action_select_mode)
 
     # convert keypoints to basis space
     kp_n = kp.detach().cpu().numpy()[0]
@@ -573,8 +602,8 @@ while not glfw.window_should_close(window):
         glDrawElements(GL_TRIANGLES, offsets['screen'].len, GL_UNSIGNED_INT, offsets['screen'].offset)
 
         buffer = glReadPixels(anchr.x, anchr.y, size.width, size.height, format=GL_RGB, type=GL_UNSIGNED_BYTE)
-        #image = Image.frombuffer(mode='RGB', size=(size.width, size.height), data=buffer)
-        #image.save(f'/home/duane/PycharmProjects/keypoints/data/patches/pong/unclassified/pong_{imageid}.png')
+        # image = Image.frombuffer(mode='RGB', size=(size.width, size.height), data=buffer)
+        # image.save(f'/home/duane/PycharmProjects/keypoints/data/patches/pong/unclassified/pong_{imageid}.png')
         pixel_array = np.frombuffer(buffer, dtype=np.uint8).reshape(size.width, size.height, 3)
         pixel_tensor = to_tensor(pixel_array)
         keypoint_images.append(pixel_tensor)
@@ -592,6 +621,8 @@ while not glfw.window_should_close(window):
     y_align = 0.7
     for k, c in zip(kp[0, :, :], categories):
         key = 'key'
+        if args.iic_model_labels is not None:
+            c = args.iic_model_labels[c]
         label = f"{key} c: {c} x: {k[0].item():.3f} y: {k[1].item():.3f}"
         drawText((-0.5, y_align, 0), label, fontsize=24)
         y_align -= 0.4
@@ -609,7 +640,7 @@ while not glfw.window_should_close(window):
 
     glfw.swap_buffers(window)
 
-    sleep(0.01)
+    #sleep(0.3)
 
 # terminate glfw, free up allocated resources
 glfw.terminate()

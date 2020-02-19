@@ -36,6 +36,8 @@ def config(args=None):
     parser.add_argument('--cma_samples', type=int, default=None)
     parser.add_argument('--cma_oversample', type=int)
     parser.add_argument('--cma_load', type=str)
+    parser.add_argument('--cma_resume', type=str)
+    parser.add_argument('--cma_workers', type=int)
 
     """ visualization params """
     parser.add_argument('--display', action='store_true')
@@ -49,9 +51,13 @@ def config(args=None):
     parser.add_argument('--model_keypoints', type=int)
     parser.add_argument('--transporter_combine_mode', type=str)
 
+    """iic parameters"""
+    parser.add_argument('--iic_model_labels', type=str, default=None)
+
     """ policy parameters """
-    parser.add_argument('--policy_action_select_mode', type=str)
-    parser.add_argument('--policy_depth', type=int)
+    parser.add_argument('--cma_policy_action_select_mode', type=str)
+    parser.add_argument('--cma_policy_features', type=int)
+    parser.add_argument('--cma_policy_depth', type=int)
 
     """ gym env parameters """
     parser.add_argument('--gym_reward_count_limit', type=int, default=None)
@@ -126,9 +132,11 @@ def config(args=None):
         'cma_step_mode': 'auto',
         'cma_step_decay': 0.001,
         'cma_oversample': 0,
+        'cma_policy_depth': 1,
 
         'policy_action_select_mode': 'argmax',
-        'cma_policy_depth': 1
+
+        'iic_model_labels': None
     }
 
     args = set_if_not_set(args, defaults)
