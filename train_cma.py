@@ -88,80 +88,62 @@ def patches(s, kp, PH, PW):
     return patches
 
 
-def view_kp_gl(s, kp_net, device):
-    s_32_32_n_t = color_transform(s).unsqueeze(0).to(device)
-    kp = kp_net(s_32_32_n_t)
-    return kp
-
-
-def view_gl(s, kp, classifier, device):
-    shrink(s)
-    s_c_t = TVF.to_tensor(s).unsqueeze(0).to(device)
-    patch = patches(s_c_t, kp, 16, 16)
-    N, K, C, H, W = patch.shape
-    patch = patch.reshape(N * K, C, H, W)
-    categories = classifier(patch)
-    # lots of cool things we can do from here...
-    # here is where we create the key:value pairs Bengio discussed in his talk to NIPS
-    categories = categories.argmax(1)  # for now just argmax
-    categories = categories.reshape(N, K)
-    return kp, categories, patch
-
-
 def view(s, kp_net, classifier, device, model_labels=None, invert_y=False):
-    s_c = crop(s)
-    s_32_32 = shrink(s_c)
-    s_32_32_n_t = color_transform(s_32_32).unsqueeze(0).to(device)
-    kp = kp_net(s_32_32_n_t)
-    s_c_t = TVF.to_tensor(s_c).unsqueeze(0).to(device)
-    patch = patches(s_c_t, kp, 16, 16)
-    N, K, C, H, W = patch.shape
-    patch = patch.reshape(N * K, C, H, W)
-    categories = classifier(patch)
-    # lots of cool things we can do from here...
-    # here is where we create the key:value pairs Bengio discussed in his talk to NIPS
-    categories = categories.softmax(dim=1)
-    categories = categories.reshape(N, K, -1)
+    with torch.no_grad():
+        s_c = crop(s)
+        s_32_32 = shrink(s_c)
+        s_32_32_n_t = color_transform(s_32_32).unsqueeze(0).to(device)
+        kp = kp_net(s_32_32_n_t)
+        s_c_t = TVF.to_tensor(s_c).unsqueeze(0).to(device)
+        patch = patches(s_c_t, kp, 16, 16)
+        N, K, C, H, W = patch.shape
+        patch = patch.reshape(N * K, C, H, W)
+        categories = classifier(patch)
+        # lots of cool things we can do from here...
+        # here is where we create the key:value pairs Bengio discussed in his talk to NIPS
+        categories = categories.softmax(dim=1)
+        categories = categories.reshape(N, K, -1)
 
-    kvp = {}
-    if model_labels is not None:
-        for k, c in zip(kp[0], categories[0]):
-            p = c.max()
-            label = model_labels[c.argmax()]
-            if label not in kvp:
-                kvp[label] = c.max(), k
-            elif p > kvp[label][0]:
-                kvp[label] = c.max(), k
-        z = torch.zeros(1, 3, 3, device=device)
-        if 'player' in kvp:
-            z[0, 0, 0] = 1.0
-            z[0, 0, 1:3] = kvp['player'][1]
-        if 'puck' in kvp:
-            z[0, 1, 0] = 1.0
-            z[0, 1, 1:3] = kvp['puck'][1]
-        if 'enemy' in kvp:
-            z[0, 2, 0] = 1.0
-            z[0, 2, 1:3] = kvp['enemy'][1]
-    else:
-        z = kp
+        kvp = {}
+        if model_labels is not None:
+            for k, c in zip(kp[0], categories[0]):
+                p = c.max()
+                label = model_labels[c.argmax()]
+                if label not in kvp:
+                    kvp[label] = c.max(), k
+                elif p > kvp[label][0]:
+                    kvp[label] = c.max(), k
+            z = torch.zeros(1, 3, 3, device=device)
+            if 'player' in kvp:
+                z[0, 0, 0] = 1.0
+                z[0, 0, 1:3] = kvp['player'][1]
+            if 'puck' in kvp:
+                z[0, 1, 0] = 1.0
+                z[0, 1, 1:3] = kvp['puck'][1]
+            if 'enemy' in kvp:
+                z[0, 2, 0] = 1.0
+                z[0, 2, 1:3] = kvp['enemy'][1]
+        else:
+            z = kp
 
-    if invert_y:
-        kp[:, :, 0] = 1 - kp[:, :, 0]
-    return z, kp, categories, patch, kvp
+        if invert_y:
+            kp[:, :, 0] = 1 - kp[:, :, 0]
+        return z, kp, categories, patch, kvp
 
 
 def get_action(z, policy, action_map, action_select_mode='argmax'):
-    policy_dtype = next(policy.parameters()).dtype
-    z = z.type(policy_dtype).flatten()
-    p = policy(z)
-    if action_select_mode == 'argmax':
-        a = torch.argmax(p)
-    elif action_select_mode == 'sample':
-        a = Categorical(p).sample()
-    else:
-        a = torch.argmax(p)
-    a = action_map(a)
-    return a
+    with torch.no_grad():
+        policy_dtype = next(policy.parameters()).dtype
+        z = z.type(policy_dtype).flatten()
+        p = policy(z)
+        if action_select_mode == 'argmax':
+            a = torch.argmax(p)
+        elif action_select_mode == 'sample':
+            a = Categorical(p).sample()
+        else:
+            a = torch.argmax(p)
+        a = action_map(a)
+        return a
 
 
 def evaluate(args, weights, features, depth, render=False, record=False):
@@ -182,20 +164,21 @@ def evaluate(args, weights, features, depth, render=False, record=False):
         pv = UniImageViewer(title='patch', screen_resolution=(64*3, 64))
 
         if args.transporter_model_type != 'nop':
+            # todo: load keypoint network only
             transporter_net = transporter.make(type=args.transporter_model_type,
                                                in_channels=args.transporter_model_in_channels,
                                                z_channels=args.transporter_model_z_channels,
                                                keypoints=args.transporter_model_keypoints,
                                                map_device='cpu',
                                                load=args.transporter_model_load)
-            kp_net = Keypoints(transporter_net).to(args.device)
+            kp_net = Keypoints(transporter_net).eval().to(args.device)
 
             # init iic categorization model
             encoder, meta = iic.models.mnn.make_layers(args.iic_model_encoder, args.iic_model_type,
                                                        LayerMetaData((3, 16, 16)))
             classifier = iic.models.classifier.Classifier(encoder, meta,
                                                           num_classes=args.iic_model_categories,
-                                                          init=args.iic_model_init).to(args.device)
+                                                          init=args.iic_model_init).eval().to(args.device)
 
             checkpoint = torch.load(args.iic_model_load)
             classifier.load_state_dict(checkpoint['model'])
@@ -305,11 +288,12 @@ if __name__ == '__main__':
         with open(log_dir + 'checkpoint.pkl', 'wb') as f:
             pickle.dump(cma, f)
 
+        _p = get_policy(policy_features, datapack.action_map.size, args.cma_policy_depth)
+        _p = cma_es.load_weights(_p, weights=ranked_results[0]['parameters'])
+        torch.save(_p.state_dict(), log_dir + 'recent_policy.pt')
+
         if ranked_results[0]['fitness'] > best_reward:
             best_reward = ranked_results[0]['fitness']
-            #torch.save(ranked_results[0]['parameters'], log_dir + 'best_of_generation.pt')
-            _p = get_policy(policy_features, datapack.action_map.size, args.cma_policy_depth)
-            _p = cma_es.load_weights(_p, weights=ranked_results[0]['parameters'])
             torch.save(_p.state_dict(), log_dir + 'best_policy.pt')
             show = True
 
