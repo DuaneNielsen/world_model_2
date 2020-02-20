@@ -608,7 +608,7 @@ while not glfw.window_should_close(window):
         pixel_tensor = to_tensor(pixel_array)
         keypoint_images.append(pixel_tensor)
 
-        viewer.render(pixel_array)
+        #viewer.render(pixel_array)
         imageid += 1
 
     keypoint_images = torch.stack(keypoint_images).to(args.device)
@@ -626,6 +626,7 @@ while not glfw.window_should_close(window):
         label = f"{key} c: {c} x: {k[0].item():.3f} y: {k[1].item():.3f}"
         drawText((-0.5, y_align, 0), label, fontsize=24)
         y_align -= 0.4
+
 
     for i, k in enumerate(kp_n):
         anchr = Pos(anchor['scratch'].x, anchor['scratch'].y - (i * 50) - 50)
