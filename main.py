@@ -641,7 +641,7 @@ while not glfw.window_should_close(window):
 
     glfw.swap_buffers(window)
 
-    #sleep(0.3)
+    sleep(0.3)
 
 # terminate glfw, free up allocated resources
 glfw.terminate()
