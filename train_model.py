@@ -16,21 +16,28 @@ viewer = UniImageViewer()
 
 
 class SAR:
-    def __init__(self, state, action, reward):
+    def __init__(self, state, action, reward, done):
         self.state = state
         self.action = np.array([action], dtype=state.dtype)
         self.reward = np.array([reward], dtype=state.dtype)
+        self.has_reward = reward != 0
+        self.terminal = done
 
 
 class Buffer:
     def __init__(self, episodes):
         self.trajectories = [[] for _ in range(episodes)]
         self.index = []
+        self.rewards_count = 0
+        self.steps_count = 0
 
-    def append(self, traj_id, state, action, reward):
+    def append(self, traj_id, state, action, reward, done):
         t = len(self.trajectories[traj_id])
-        self.trajectories[traj_id].append(SAR(state, action, reward))
+        self.trajectories[traj_id].append(SAR(state, action, reward, done))
         self.index.append((traj_id, t))
+        self.steps_count += 1
+        if reward != 0:
+            self.rewards_count += 1
 
     def get_step(self, item):
         traj_id, step_id = self.index[item]
@@ -65,6 +72,7 @@ class SARDataset:
 
 class RewDataset:
     def __init__(self, buffer, len):
+        """ returns individual steps"""
         self.b = buffer
         self.len = len
 
@@ -79,20 +87,16 @@ class RewDataset:
 
     def weights(self):
         """probabilites to rebalance for sparse rewards"""
-        l = self.__len__()
-        rcount = 0
-        for i in range(l):
-            if self[i][1] != 0:
-                rcount += 1
-        w_rew = 1 / rcount * 0.5
-        w_no_rew = 1 / (l - rcount) * 0.5
+        w_rew = 1 / self.b.rewards_count * 0.5
+        w_no_rew = 1 / (len(self) - self.b.rewards_count) * 0.5
 
         weights = []
-        for i in range(l):
-            if self[i][1] != 0:
-                weights.append(w_rew)
-            else:
-                weights.append(w_no_rew)
+        for t in self.b.trajectories:
+            for step in t:
+                if step.has_reward:
+                    weights.append(w_rew)
+                else:
+                    weights.append(w_no_rew)
         return weights
 
 
@@ -111,12 +115,12 @@ def gather_data(env, episodes):
     for trajectory in tqdm(range(episodes)):
         state, reward, done = env.reset(), 0.0, False
         action = env.action_space.sample()
-        buff.append(trajectory, state, action, reward)
+        buff.append(trajectory, state, action, reward, done)
 
         while not done:
             state, reward, done, info = env.step(action)
             action = env.action_space.sample()
-            buff.append(trajectory, state, action, reward)
+            buff.append(trajectory, state, action, reward, done)
             env.render()
 
     return buff
@@ -176,7 +180,7 @@ def main():
 
 if __name__ == '__main__':
     defaults = dict(frame_op_len=8,
-                    episodes=32,
+                    episodes=3,
                     rew_length=4,
                     rew_batchsize=32)
 
