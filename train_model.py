@@ -267,7 +267,7 @@ def sample_action(state, policy, prepro, env, eps):
     return action
 
 
-def gather_data(episodes):
+def gather_data(episodes, env):
     buff = Buffer()
 
     policy = Policy()
@@ -275,12 +275,6 @@ def gather_data(episodes):
         '/home/duane/PycharmProjects/SLM-Lab/data/ppo_shared_pong_2020_02_27_230356/model/ppo_shared_pong_t0_s0_net_model.pt')
     policy.load_state_dict(state_dict)
 
-    env = gym.make('PongNoFrameskip-v4')
-    env = wrappers.NoopResetEnv(env, noop_max=30)
-    env = wrappers.MaxAndSkipEnv(env, skip=4)
-    env = AtariARIWrapper(env)
-    env = wrappers.AtariAriVector(env)
-    env = wrappers.FireResetEnv(env)
     # env = wrappers.FrameStack(env, 'concat', 4)
     prepro = PrePro()
 
@@ -480,8 +474,17 @@ def main():
     ball = [2, 3]
     all = [0, 1, 2, 3]
 
-    buff = gather_data(wandb.config.train_len)
-    test_buff = gather_data(wandb.config.test_len)
+    env = gym.make('PongNoFrameskip-v4')
+    env = wrappers.NoopResetEnv(env, noop_max=30)
+    env = wrappers.MaxAndSkipEnv(env, skip=4)
+    env = AtariARIWrapper(env)
+    env = wrappers.AtariAriVector(env)
+    env = wrappers.FireResetEnv(env)
+
+    buff = gather_data(wandb.config.train_len, env)
+
+    env = wrappers.ActionBranches(env)
+    test_buff = gather_data(wandb.config.test_len, env)
 
     train_reward(buff, test_buff, epochs=10, test_freq=3)
     train_done(buff, test_buff, epochs=10, test_freq=3)

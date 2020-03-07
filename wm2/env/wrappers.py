@@ -197,3 +197,23 @@ class FrameStack(gym.Wrapper):
     def _get_rew(self):
         assert len(self.rews) == self.frame_op_len
         return LazyFrames(list(self.rews), self.frame_op)
+
+
+class ActionBranches(gym.Wrapper):
+    def __init__(self, env):
+        super().__init__(env)
+
+    def reset(self):
+        return self.env.reset()
+
+    def step(self, action):
+        savegame = self.env.clone_full_state()
+        alternates = []
+        for a in range(self.action_space.n):
+            self.env.restore_full_state(savegame)
+            state, rew, done, _ = self.env.step(a)
+            alternates.append((state, rew, done))
+        self.env.restore_full_state(savegame)
+        state, rew, done, info = self.env.step(action)
+        info['alternates'] = alternates
+        return state, rew, done, info
