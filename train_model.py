@@ -4,68 +4,25 @@ from atariari.benchmark.wrapper import AtariARIWrapper
 import wm2.env.wrappers as wrappers
 from keypoints.utils import UniImageViewer
 import torch
+
+from utils import TensorNamespace, Pbar, SARI, one_hot
 from wm2.models.causal import Model
 from torch.optim import Adam
 import torch.nn as nn
-from torch.utils.data.dataset import Dataset, Subset
+from torch.utils.data.dataset import Dataset
 from torch.utils.data.dataloader import DataLoader
 from torch.utils.data.sampler import WeightedRandomSampler
 import wandb
 from tqdm import tqdm
 from collections import deque
-from torchvision.transforms.functional import to_tensor
 from torch.distributions import Categorical
 import random
-from statistics import mean
 from time import sleep
+from types import SimpleNamespace
+import pickle
+from pathlib import Path
 
 viewer = UniImageViewer()
-
-
-class Pbar:
-    def __init__(self, epochs, train_len, batch_size, label):
-        """
-
-        :param epochs: number of epochs to train
-        :param train_len: length of the training dataset (number of items)
-        :param batch_size: items per batch
-        :param label: a label to display on the progress bar
-        """
-        self.bar = tqdm(total=epochs * train_len)
-        self.label = label
-        self.loss_move_ave = deque(maxlen=20)
-        self.test = []
-        self.test_loss = 0.0
-        self.train_loss = 0.0
-        self.batch_size = batch_size
-
-    def update_test_loss(self, loss):
-        self.test.append(loss.item())
-        self.test_loss = mean(list(self.test))
-        self.bar.set_description(f'{self.label} train_loss: {self.train_loss:.6f} test_loss: {self.test_loss:.6f}')
-
-    def update_train_loss(self, loss):
-        self.test = []
-        self.loss_move_ave.append(loss.item())
-        self.train_loss = mean(list(self.loss_move_ave))
-        self.bar.update(self.batch_size)
-        self.bar.set_description(f'{self.label} train_loss: {self.train_loss:.6f} test_loss: {self.test_loss:.6f}')
-
-    def close(self):
-        self.bar.close()
-
-
-pbar = None
-
-
-class SARI:
-    def __init__(self, state, action, reward, done, info):
-        self.state = state
-        self.action = action
-        self.reward = np.array([reward], dtype=state.dtype)
-        self.has_reward = reward != 0
-        self.done = done
-        self.info = info
 
 
 class Buffer:
@@ -108,11 +65,8 @@ class Buffer:
             prefix.append(self.trajectories[traj_id][i])
         return prefix
 
-
-def one_hot(a, max, dtype=np.float32):
-    hot = np.zeros(max + 1, dtype=dtype)
-    hot[a] = 1.0
-    return hot
+    def __len__(self):
+        return len(self.trajectories)
 
 
 class SARDataset(Dataset):
@@ -132,37 +86,6 @@ class SARDataset(Dataset):
             action += [one_hot(step.action, self.b.action_max)]
 
         return {'state': np.stack(state), 'action': np.stack(action), 'reward': np.stack(reward)}
-
-
-class SARLookaheadDataset(Dataset):
-    def __init__(self, buffer, state_dims, reward_dims=1, action_dims=None):
-        super().__init__()
-        self.b = buffer
-        # put these on the buffer
-        self.state_dims = state_dims + reward_dims
-        self.action_dims = action_dims if action_dims is not None else self.b.action_max + 1
-
-    def __len__(self):
-        return len(self.b.trajectories)
-
-    def __getitem__(self, item):
-        """T, A, S : timestep, action, state"""
-        trajectory = self.b.trajectories[item]
-        l = len(trajectory) - 1  # minus 1 because it's transitions
-        source = np.empty((l, self.action_dims, self.state_dims))
-        target = np.empty((l, self.action_dims, self.state_dims))
-        actions = np.eye(self.action_dims)
-        actions = np.tile(actions, (l, 1, 1))
-
-        for t in range(l):
-            step = trajectory[t]
-            next_step = trajectory[t + 1]
-            for a in range(self.action_dims):
-                source[t, a, :] = np.concatenate((step.state, step.reward))
-                next_state, next_rew, next_done = next_step.info['alternates'][a]
-                target[t, a, :] = np.concatenate((next_state, np.array([next_rew])))
-
-        return source, target, actions
 
 
 class RewDataset:
@@ -225,38 +148,6 @@ class DoneDataset:
                 else:
                     weights.append(w_not_done)
         return weights
-
-
-def split(data, train_len, test_len):
-    total_len = train_len + test_len
-    train = Subset(data, range(0, train_len))
-    test = Subset(data, range(train_len, total_len))
-    return train, test
-
-
-"""
-MLPNet(
-  (model): Sequential(
-    (0): Linear(in_features=16, out_features=16, bias=True)
-    (1): ReLU()
-    (2): Linear(in_features=16, out_features=16, bias=True)
-    (3): ReLU()
-    (4): Linear(in_features=16, out_features=16, bias=True)
-    (5): ReLU()
-    (6): Linear(in_features=16, out_features=16, bias=True)
-    (7): ReLU()
-  )
-  (model_tails): ModuleList(
-    (0): Sequential(
-      (0): Linear(in_features=16, out_features=6, bias=True)
-    )
-    (1): Sequential(
-      (0): Linear(in_features=16, out_features=1, bias=True)
-    )
-  )
-  (loss_fn): MSELoss()
-)
-"""
 
 
 class Policy(nn.Module):
@@ -405,29 +296,6 @@ def train_done(buff, test_buff, epochs, test_freq):
     pbar.close()
 
 
-# def train_done(buff):
-#     data = DoneDataset(buff, prefix_len=wandb.config.done_prefix_len)
-#     weights = data.weights()
-#     sampler = WeightedRandomSampler(weights, len(weights))
-#     data = DataLoader(data, batch_size=wandb.config.done_batchsize, sampler=sampler, drop_last=True)
-#     criterion = nn.BCEWithLogitsLoss()
-#
-#     model = nn.Sequential(nn.Linear(wandb.config.done_prefix_len * 4, 512), nn.BatchNorm1d(512), nn.ReLU(),
-#                           nn.Linear(512, 1, bias=False))
-#     optim = torch.optim.Adam(model.parameters(), lr=1e-4)
-#
-#     for epoch in range(10000):
-#         batch = tqdm(data)
-#         for source, target in batch:
-#             optim.zero_grad()
-#             estimate = model(source)
-#             loss = criterion(target, estimate)
-#             loss.backward()
-#             optim.step()
-#             wandb.log({'done_loss': loss.item()})
-#             batch.set_description(f'done_loss {loss.item()}')
-
-
 def chomp(seq, end, dim, bite_size):
     chomped_len = seq.size(dim) - bite_size
     if end == 'left':
@@ -438,37 +306,7 @@ def chomp(seq, end, dim, bite_size):
         Exception('end parameter must be left or right')
 
 
-# class PadCollateAutoRegress():
-#     def __init__(self, target_index=None, offset=1, return_loss_mask=False):
-#         """
-#         Returns a source signal and copy of the source signal advanced by 1 or more steos
-#         Used to learn a predictive sequence
-#         Dimensions (N, C, L) where N = batch size, C is number of input channels, L is the sequence length
-#         Sequences are padded with zeros so they are all the same length as the longest sequence
-#         :param index_tensor: if you want to return just a subset of the the input signals as a target,
-#         specify the indices in a list eg: [0, 1, 3, 4]
-#         :param offset: the amount to advance the target signal, default 1 timestep
-#         :param return_loss_mask: if true, returns a lost mask that can be used to ignore padding
-#         """
-        #self.index_tensor = torch.LongTensor(target_index) if target_index is not None else None
-        #self.offset = offset
-        #self.return_loss_mask = return_loss_mask
-
 def pad(batch, longest):
-    # pad the sequences to the longest
-    state, action, reward = [], [], []
-    for trajectory in batch:
-        pad_len = longest - trajectory['state'].shape[0]
-        state += [np.pad(trajectory['state'], ((0, pad_len), (0, 0)))]
-        action += [np.pad(trajectory['action'], ((0, pad_len), (0, 0)))]
-        reward += [np.pad(trajectory['reward'], ((0, pad_len), (0, 0)))]
-    state = np.stack(state)
-    action = np.stack(action)
-    reward = np.stack(reward)
-    return state, action, reward
-
-
-def pad2(batch, longest):
     params = {}
     for trajectory in batch:
         pad_len = longest - trajectory['state'].shape[0]
@@ -495,47 +333,15 @@ def make_mask(batch, longest, dtype=np.float):
     return mask
 
 
-def pad_collate_sar(batch):
+def pad_collate(batch):
     longest = max([trajectory['state'].shape[0] for trajectory in batch])
-    state, action, reward = pad(batch, longest)
-    mask = make_mask(batch, longest, dtype=state.dtype)
-    return torch.from_numpy(state), torch.from_numpy(action), torch.from_numpy(reward), \
-           torch.from_numpy(mask)
-
-
-def pad_collate_sar2(batch):
-    longest = max([trajectory['state'].shape[0] for trajectory in batch])
-    data = pad2(batch, longest)
+    data = pad(batch, longest)
     dtype = data[next(iter(data))].dtype
     mask = make_mask(batch, longest, dtype=dtype)
     data['mask'] = mask
     for key in data:
         data[key] = torch.from_numpy(data[key])
-    return data
-
-def pad_collate(batch):
-    """
-    N - batchsize
-    C - state dimensions
-    A - action space
-    L - trajectory length
-    :param batch: N items consisting of source (T, A, S) and target (T, A,  S)
-    :return: source(N, T, A, S), target(N, T, A, S), actions(N, T, one_hot, A), mask (N, L)
-    """
-    longest = max([t.shape[2] for s, t, a in batch])
-    mask = []
-    source = []
-    target = []
-    actions = []
-    for s, t, a in batch:
-        l = s.shape[2]
-        mask += [np.concatenate((np.ones(l), np.zeros(longest - l)))]
-        source += [np.pad(s, ((0, 0), (0, 0), (0, longest - l)))]
-        target += [np.pad(t, ((0, 0), (0, 0), (0, longest - l)))]
-        actions += [np.pad(a, ((0, 0), (0, 0), (0, longest - l)))]
-
-    return torch.from_numpy(np.stack(source)), torch.from_numpy(np.stack(target)), \
-           torch.from_numpy(np.stack(actions)), torch.from_numpy(np.stack(mask))
+    return TensorNamespace(**data)
 
 
 def autoregress(state, action, reward, mask, target_start=0, target_length=None, target_reward=False, advance=1):
@@ -561,52 +367,65 @@ def autoregress(state, action, reward, mask, target_start=0, target_length=None,
         target = state.clone()
     if target_length is not None:
         target = target.narrow(dim=2, start=target_start, length=target_length)
-    source = chomp(source, 'right', dim=1, bite_size=advance)
-    action = chomp(action, 'right', dim=1, bite_size=advance)
-    target = chomp(target, 'left', dim=1, bite_size=advance)
-    mask = chomp(mask, 'left', dim=1, bite_size=advance)
-    return source, action, target, mask
+
+    ret = {}
+    ret['source'] = chomp(source, 'right', dim=1, bite_size=advance)
+    ret['action'] = chomp(action, 'right', dim=1, bite_size=advance)
+    ret['target'] = chomp(target, 'left', dim=1, bite_size=advance)
+    ret['mask'] = chomp(mask, 'left', dim=1, bite_size=advance)
+    return TensorNamespace(**ret)
+
+
 
 
 def train_predictor(predictor, train_buff, test_buff, epochs, target_start, target_len, label, batch_size, test_freq=1):
-    train, test = SARDataset(train_buff), SARLookaheadDataset(test_buff, 11)
-    #train, test = SARDataset(train_buff), None
+    train, test = SARDataset(train_buff), SARDataset(test_buff)
     pbar = Pbar(epochs=epochs, train_len=len(train), batch_size=batch_size, label=label)
-    train = DataLoader(train, batch_size=batch_size, collate_fn=pad_collate_sar)
+    train = DataLoader(train, batch_size=batch_size, collate_fn=pad_collate)
     test = DataLoader(test, batch_size=wandb.config.test_len, collate_fn=pad_collate)
 
     optim = Adam(predictor.parameters(), lr=1e-4)
 
     for epoch in range(epochs):
 
-        for state, action, reward, mask in train:
-            source, action, target, mask = autoregress(state, action, reward, mask, target_start, target_len)
-            source, action, target, mask = source.to(device), action.to(device), target.to(device), mask.to(device)
+        for mb in train:
+            seqs = autoregress(mb.state, mb.action, mb.reward, mb.mask, target_start, target_len).to(device)
             optim.zero_grad()
-            estimate = predictor(source, action)
-            loss = (((target - estimate) * mask) ** 2).mean()
+            estimate = predictor(seqs.source, seqs.action)
+            loss = (((seqs.target - estimate) * seqs.mask) ** 2).mean()
             loss.backward()
             optim.step()
-            wandb.log({f'{label}_pred_loss': loss.item()})
+            wandb.log({f'{label}_train_loss': loss.item()})
             pbar.update_train_loss(loss)
 
         if epoch % test_freq == 0:
             with torch.no_grad():
-                for source, target, mask in test:
-                    source, target, mask = source.to(device), target.to(device), mask.to(device)
-                    estimate = predictor(source, action)
-                    loss = (((target - estimate) * mask) ** 2).mean()
-                    wandb.log({f'{label}_pred_test_loss': loss.item()})
+                for mb in test:
+                    seqs = autoregress(mb.state, mb.action, mb.reward, mb.mask, target_start, target_len).to(device)
+                    estimate = predictor(seqs.source, seqs.action)
+                    loss = (((seqs.target - estimate) * seqs.mask) ** 2).mean()
+                    wandb.log({f'{label}_test_loss': loss.item()})
                     pbar.update_test_loss(loss)
 
     pbar.close()
 
 
+def load_or_generate(env, n, path=None):
+    if path is not None:
+        buff_path = Path(path)
+        if buff_path.exists():
+            with buff_path.open('rb') as f:
+                buff = pickle.load(f)
+                if len(buff) == n:
+                    return buff
+
+    buff = gather_data(len, env, wandb.config.render)
+    if path is not None:
+        with Path(path).open('wb') as f:
+            pickle.dump(buff, f)
+    return buff
+
 def main():
-    player = [0]
-    enemy = [1]
-    ball = [2, 3]
-    all = [0, 1, 2, 3]
 
     env = gym.make('PongNoFrameskip-v4')
     env = wrappers.NoopResetEnv(env, noop_max=30)
@@ -615,34 +434,33 @@ def main():
     env = wrappers.AtariAriVector(env)
     env = wrappers.FireResetEnv(env)
 
-    buff = gather_data(wandb.config.train_len, env, wandb.config.render)
+    train_buff = load_or_generate(env, wandb.config.train_len, 'data/buff.pkl')
+    test_buff = load_or_generate(env, wandb.config.test_len, 'data/test_buff.pkl')
 
-    env = wrappers.ActionBranches(env)
-    test_buff = gather_data(wandb.config.test_len, env, wandb.config.render)
+
+    state_dims = 4
+    action_dims = 6
+    reward_dims = 1
+
+    ensemble = {}
+    ensemble['all'] = SimpleNamespace(hidden=[512, 512, 512, 512], epochs=1000, target_start=0, target_len=4)
+    ensemble['player'] = SimpleNamespace(hidden=[512, 512, 512, 512], epochs=500, target_start=0, target_len=1)
+    ensemble['enemy'] = SimpleNamespace(hidden=[512, 512, 512, 512], epochs=1000, target_start=1, target_len=1)
+    ensemble['ball'] = SimpleNamespace(hidden=[512, 512, 512, 512], epochs=1000, target_start=2, target_len=2)
 
     # train_reward(buff, test_buff, epochs=10, test_freq=3)
     # train_done(buff, test_buff, epochs=10, test_freq=3)
 
-    player_predictor = Model(4, 6, 1, [512, 512, 512, 512], len(player)).to(device)
-    train_predictor(predictor=player_predictor, train_buff=buff, test_buff=test_buff, epochs=10, target_start=0,
-                    target_len=1, label='player', batch_size=wandb.config.predictor_batchsize)
-
-    # ball_predictor = TemporalConvNet(11, [512, 512, 512, 512, len(ball)]).to(device)
-    # train_predictor(predictor=ball_predictor, test_buff=buff, train_buff=test_buff, indices=ball, epochs=20,
-    #                 label='ball', batch_size=wandb.config.predictor_batchsize)
-    #
-    # enemy_predictor = TemporalConvNet(11, [512, 512, 512, 512, len(enemy)]).to(device)
-    # train_predictor(predictor=enemy_predictor, test_buff=buff, train_buff=test_buff, indices=enemy, epochs=10,
-    #                 label='enemy', batch_size=wandb.config.predictor_batchsize)
-    #
-    # all_predictor = TemporalConvNet(11, [512, 512, 512, 512, len(all)]).to(device)
-    # train_predictor(predictor=all_predictor, test_buff=buff, train_buff=test_buff, indices=all, epochs=20,
-    #                 label='all', batch_size=wandb.config.predictor_batchsize)
+    for label, args in ensemble.items():
+        predictor = Model(state_dims, action_dims, reward_dims, args.hidden, args.target_len).to(device)
+        train_predictor(predictor=predictor, train_buff=train_buff, test_buff=test_buff, epochs=args.epochs,
+                        target_start=args.target_start,
+                        target_len=args.target_len, label=label, batch_size=wandb.config.predictor_batchsize)
 
 
 if __name__ == '__main__':
     defaults = dict(frame_op_len=8,
-                    train_len=32,
+                    train_len=64,
                     test_len=16,
                     predictor_batchsize=32,
                     render=False,
@@ -663,7 +481,7 @@ if __name__ == '__main__':
                done_batchsize=256,
                test_freq=10)
 
-    wandb.init(config=dev)
+    wandb.init(config=defaults)
 
     # config validations
     config = wandb.config
