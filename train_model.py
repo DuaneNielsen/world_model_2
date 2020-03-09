@@ -4,7 +4,7 @@ from atariari.benchmark.wrapper import AtariARIWrapper
 import wm2.env.wrappers as wrappers
 from keypoints.utils import UniImageViewer
 import torch
-from wm2.models.causal import TemporalConvNet
+from wm2.models.causal import Model
 from torch.optim import Adam
 import torch.nn as nn
 from torch.utils.data.dataset import Dataset, Subset
@@ -17,6 +17,7 @@ from torchvision.transforms.functional import to_tensor
 from torch.distributions import Categorical
 import random
 from statistics import mean
+from time import sleep
 
 viewer = UniImageViewer()
 
@@ -57,13 +58,14 @@ class Pbar:
 pbar = None
 
 
-class SAR:
-    def __init__(self, state, action, reward, done):
+class SARI:
+    def __init__(self, state, action, reward, done, info):
         self.state = state
         self.action = action
         self.reward = np.array([reward], dtype=state.dtype)
         self.has_reward = reward != 0
         self.done = done
+        self.info = info
 
 
 class Buffer:
@@ -75,11 +77,11 @@ class Buffer:
         self.steps_count = 0
         self.action_max = 0
 
-    def append(self, traj_id, state, action, reward, done):
+    def append(self, traj_id, state, action, reward, done, info):
         if traj_id >= len(self.trajectories):
             self.trajectories.append([])
         t = len(self.trajectories[traj_id])
-        self.trajectories[traj_id].append(SAR(state, action, reward, done))
+        self.trajectories[traj_id].append(SARI(state, action, reward, done, info))
         self.index.append((traj_id, t))
         self.steps_count += 1
         if reward != 0:
@@ -123,9 +125,44 @@ class SARDataset(Dataset):
 
     def __getitem__(self, item):
         trajectory = self.b.trajectories[item]
-        sequence = [np.concatenate((step.state, one_hot(step.action, self.b.action_max), step.reward), axis=0) for step
-                    in trajectory]
-        return np.stack(sequence, axis=1)
+        state, reward, action = [], [], []
+        for step in trajectory:
+            state += [step.state]
+            reward += [step.reward]
+            action += [one_hot(step.action, self.b.action_max)]
+
+        return {'state': np.stack(state), 'action': np.stack(action), 'reward': np.stack(reward)}
+
+
+class SARLookaheadDataset(Dataset):
+    def __init__(self, buffer, state_dims, reward_dims=1, action_dims=None):
+        super().__init__()
+        self.b = buffer
+        # put these on the buffer
+        self.state_dims = state_dims + reward_dims
+        self.action_dims = action_dims if action_dims is not None else self.b.action_max + 1
+
+    def __len__(self):
+        return len(self.b.trajectories)
+
+    def __getitem__(self, item):
+        """T, A, S : timestep, action, state"""
+        trajectory = self.b.trajectories[item]
+        l = len(trajectory) - 1  # minus 1 because it's transitions
+        source = np.empty((l, self.action_dims, self.state_dims))
+        target = np.empty((l, self.action_dims, self.state_dims))
+        actions = np.eye(self.action_dims)
+        actions = np.tile(actions, (l, 1, 1))
+
+        for t in range(l):
+            step = trajectory[t]
+            next_step = trajectory[t + 1]
+            for a in range(self.action_dims):
+                source[t, a, :] = np.concatenate((step.state, step.reward))
+                next_state, next_rew, next_done = next_step.info['alternates'][a]
+                target[t, a, :] = np.concatenate((next_state, np.array([next_rew])))
+
+        return source, target, actions
 
 
 class RewDataset:
@@ -267,7 +304,7 @@ def sample_action(state, policy, prepro, env, eps):
     return action
 
 
-def gather_data(episodes, env):
+def gather_data(episodes, env, render=False):
     buff = Buffer()
 
     policy = Policy()
@@ -278,18 +315,16 @@ def gather_data(episodes, env):
     # env = wrappers.FrameStack(env, 'concat', 4)
     prepro = PrePro()
 
-    from time import sleep
-
     for trajectory in tqdm(range(episodes)):
-        state, reward, done = env.reset(), 0.0, False
+        state, reward, done, info = env.reset(), 0.0, False, {}
         action = sample_action(state, policy, prepro, env, 0.9)
-        buff.append(trajectory, state, action, reward, done)
+        buff.append(trajectory, state, action, reward, done, info)
 
         while not done:
             state, reward, done, info = env.step(action)
             action = sample_action(state, policy, prepro, env, 0.09)
-            buff.append(trajectory, state, action, reward, done)
-            if wandb.config.render:
+            buff.append(trajectory, state, action, reward, done, info)
+            if render:
                 sleep(0.04)
                 env.render()
 
@@ -393,63 +428,162 @@ def train_done(buff, test_buff, epochs, test_freq):
 #             batch.set_description(f'done_loss {loss.item()}')
 
 
-class PadCollate():
-    def __init__(self, target_index=None, offset=1, return_loss_mask=False):
-        """
-        Returns a source signal and copy of the source signal advanced by 1 or more steos
-        Used to learn a predictive sequence
-        Dimensions (N, C, L) where N = batch size, C is number of input channels, L is the sequence length
-        Sequences are padded with zeros so they are all the same length as the longest sequence
-        :param index_tensor: if you want to return just a subset of the the input signals as a target,
-        specify the indices in a list eg: [0, 1, 3, 4]
-        :param offset: the amount to advance the target signal, default 1 timestep
-        :param return_loss_mask: if true, returns a lost mask that can be used to ignore padding
-        """
-        self.index_tensor = torch.LongTensor(target_index) if target_index is not None else None
-        self.offset = offset
-        self.return_loss_mask = return_loss_mask
-
-    def __call__(self, batch):
-        longest = max([traj.shape[1] for traj in batch])
-        mask = [np.ones((1, t.shape[1])) for t in batch]
-        batch = [np.pad(t, ((0, 0), (0, longest - t.shape[1]))) for t in batch]
-        mask = [np.pad(t, ((0, 0), (0, longest - t.shape[1]))) for t in mask]
-        batch = np.stack(batch, axis=0)
-
-        source = np.pad(batch.copy(), ((0, 0), (0, 0), (self.offset, 0)))
-        target = np.pad(batch, ((0, 0), (0, 0), (0, self.offset)))
-        source = torch.from_numpy(source)
-        if self.index_tensor is not None:
-            target = torch.from_numpy(target)[:, self.index_tensor, :]
-        else:
-            target = torch.from_numpy(target)
-        if self.return_loss_mask:
-            mask = np.stack(mask, axis=0)
-            # right padding is not useful
-            mask = np.pad(mask, ((0, 0), (0, 0), (0, self.offset)))
-            # discard left padding also
-            mask[:, :, 0] = 0
-            mask = torch.from_numpy(mask)
-            return source, target, mask
-        return source, target
+def chomp(seq, end, dim, bite_size):
+    chomped_len = seq.size(dim) - bite_size
+    if end == 'left':
+        return torch.narrow(seq, dim, bite_size, chomped_len)
+    if end == 'right':
+        return torch.narrow(seq, dim, 0, chomped_len)
+    else:
+        Exception('end parameter must be left or right')
 
 
-def train_predictor(predictor, train_buff, test_buff, indices, epochs, label, batch_size, test_freq=2):
+# class PadCollateAutoRegress():
+#     def __init__(self, target_index=None, offset=1, return_loss_mask=False):
+#         """
+#         Returns a source signal and copy of the source signal advanced by 1 or more steos
+#         Used to learn a predictive sequence
+#         Dimensions (N, C, L) where N = batch size, C is number of input channels, L is the sequence length
+#         Sequences are padded with zeros so they are all the same length as the longest sequence
+#         :param index_tensor: if you want to return just a subset of the the input signals as a target,
+#         specify the indices in a list eg: [0, 1, 3, 4]
+#         :param offset: the amount to advance the target signal, default 1 timestep
+#         :param return_loss_mask: if true, returns a lost mask that can be used to ignore padding
+#         """
+        #self.index_tensor = torch.LongTensor(target_index) if target_index is not None else None
+        #self.offset = offset
+        #self.return_loss_mask = return_loss_mask
 
-    train, test = SARDataset(train_buff), SARDataset(test_buff)
+def pad(batch, longest):
+    # pad the sequences to the longest
+    state, action, reward = [], [], []
+    for trajectory in batch:
+        pad_len = longest - trajectory['state'].shape[0]
+        state += [np.pad(trajectory['state'], ((0, pad_len), (0, 0)))]
+        action += [np.pad(trajectory['action'], ((0, pad_len), (0, 0)))]
+        reward += [np.pad(trajectory['reward'], ((0, pad_len), (0, 0)))]
+    state = np.stack(state)
+    action = np.stack(action)
+    reward = np.stack(reward)
+    return state, action, reward
+
+
+def pad2(batch, longest):
+    params = {}
+    for trajectory in batch:
+        pad_len = longest - trajectory['state'].shape[0]
+        padding = [(0, pad_len)]  # right pad only the first dim
+        padding += [(0, 0) for _ in range(len(trajectory['state'].shape)-1)]
+
+        for key in trajectory:
+            if key not in params:
+                params[key] = []
+            params[key] += [np.pad(trajectory[key], padding)]
+
+    for key in params:
+        params[key] = np.stack(params[key])
+    return params
+
+
+def make_mask(batch, longest, dtype=np.float):
+    mask = []
+    for trajectory in batch:
+        l = trajectory['state'].shape[0]
+        mask += [np.concatenate((np.ones(l, dtype=dtype), np.zeros(longest - l, dtype=dtype)))]
+    mask = np.stack(mask)
+    mask = np.expand_dims(mask, axis=2)
+    return mask
+
+
+def pad_collate_sar(batch):
+    longest = max([trajectory['state'].shape[0] for trajectory in batch])
+    state, action, reward = pad(batch, longest)
+    mask = make_mask(batch, longest, dtype=state.dtype)
+    return torch.from_numpy(state), torch.from_numpy(action), torch.from_numpy(reward), \
+           torch.from_numpy(mask)
+
+
+def pad_collate_sar2(batch):
+    longest = max([trajectory['state'].shape[0] for trajectory in batch])
+    data = pad2(batch, longest)
+    dtype = data[next(iter(data))].dtype
+    mask = make_mask(batch, longest, dtype=dtype)
+    data['mask'] = mask
+    for key in data:
+        data[key] = torch.from_numpy(data[key])
+    return data
+
+def pad_collate(batch):
+    """
+    N - batchsize
+    C - state dimensions
+    A - action space
+    L - trajectory length
+    :param batch: N items consisting of source (T, A, S) and target (T, A,  S)
+    :return: source(N, T, A, S), target(N, T, A, S), actions(N, T, one_hot, A), mask (N, L)
+    """
+    longest = max([t.shape[2] for s, t, a in batch])
+    mask = []
+    source = []
+    target = []
+    actions = []
+    for s, t, a in batch:
+        l = s.shape[2]
+        mask += [np.concatenate((np.ones(l), np.zeros(longest - l)))]
+        source += [np.pad(s, ((0, 0), (0, 0), (0, longest - l)))]
+        target += [np.pad(t, ((0, 0), (0, 0), (0, longest - l)))]
+        actions += [np.pad(a, ((0, 0), (0, 0), (0, longest - l)))]
+
+    return torch.from_numpy(np.stack(source)), torch.from_numpy(np.stack(target)), \
+           torch.from_numpy(np.stack(actions)), torch.from_numpy(np.stack(mask))
+
+
+def autoregress(state, action, reward, mask, target_start=0, target_length=None, target_reward=False, advance=1):
+    """
+
+    :param state: (N, T, S)
+    :param action: (N, T, A)
+    :param reward: (N, T, 1)
+    :param mask: (N, T, 1)
+    :param target_start: start index of a slice across the state dimension to output as target
+    :param target_length: length of slice across the state dimension to output as target
+    :param target_reward: outputs reward as the target
+    :param advance: the amount of timesteps to advance the target, default 1
+    :return:
+    source: concatenated (state, action, reward),
+    target: subset of the source advanced by 1,
+    mask: loss_mask that is zero where padding was put, or where it makes no sense to make a prediction
+    """
+    source = torch.cat((state, reward), dim=2)
+    if target_reward:
+        target = reward
+    else:
+        target = state.clone()
+    if target_length is not None:
+        target = target.narrow(dim=2, start=target_start, length=target_length)
+    source = chomp(source, 'right', dim=1, bite_size=advance)
+    action = chomp(action, 'right', dim=1, bite_size=advance)
+    target = chomp(target, 'left', dim=1, bite_size=advance)
+    mask = chomp(mask, 'left', dim=1, bite_size=advance)
+    return source, action, target, mask
+
+
+def train_predictor(predictor, train_buff, test_buff, epochs, target_start, target_len, label, batch_size, test_freq=1):
+    train, test = SARDataset(train_buff), SARLookaheadDataset(test_buff, 11)
+    #train, test = SARDataset(train_buff), None
     pbar = Pbar(epochs=epochs, train_len=len(train), batch_size=batch_size, label=label)
-    pad_collate = PadCollate(indices, return_loss_mask=True)
-    train = DataLoader(train, batch_size=batch_size, collate_fn=pad_collate)
+    train = DataLoader(train, batch_size=batch_size, collate_fn=pad_collate_sar)
     test = DataLoader(test, batch_size=wandb.config.test_len, collate_fn=pad_collate)
 
     optim = Adam(predictor.parameters(), lr=1e-4)
 
     for epoch in range(epochs):
 
-        for source, target, mask in train:
-            source, target, mask = source.to(device), target.to(device), mask.to(device)
+        for state, action, reward, mask in train:
+            source, action, target, mask = autoregress(state, action, reward, mask, target_start, target_len)
+            source, action, target, mask = source.to(device), action.to(device), target.to(device), mask.to(device)
             optim.zero_grad()
-            estimate = predictor(source)
+            estimate = predictor(source, action)
             loss = (((target - estimate) * mask) ** 2).mean()
             loss.backward()
             optim.step()
@@ -460,7 +594,7 @@ def train_predictor(predictor, train_buff, test_buff, indices, epochs, label, ba
             with torch.no_grad():
                 for source, target, mask in test:
                     source, target, mask = source.to(device), target.to(device), mask.to(device)
-                    estimate = predictor(source)
+                    estimate = predictor(source, action)
                     loss = (((target - estimate) * mask) ** 2).mean()
                     wandb.log({f'{label}_pred_test_loss': loss.item()})
                     pbar.update_test_loss(loss)
@@ -481,29 +615,29 @@ def main():
     env = wrappers.AtariAriVector(env)
     env = wrappers.FireResetEnv(env)
 
-    buff = gather_data(wandb.config.train_len, env)
+    buff = gather_data(wandb.config.train_len, env, wandb.config.render)
 
     env = wrappers.ActionBranches(env)
-    test_buff = gather_data(wandb.config.test_len, env)
+    test_buff = gather_data(wandb.config.test_len, env, wandb.config.render)
 
-    train_reward(buff, test_buff, epochs=10, test_freq=3)
-    train_done(buff, test_buff, epochs=10, test_freq=3)
+    # train_reward(buff, test_buff, epochs=10, test_freq=3)
+    # train_done(buff, test_buff, epochs=10, test_freq=3)
 
-    player_predictor = TemporalConvNet(11, [512, 512, 512, 512, len(player)]).to(device)
-    train_predictor(predictor=player_predictor, test_buff=buff, train_buff=test_buff, indices=player, epochs=10,
-                    label='player', batch_size=wandb.config.predictor_batchsize)
+    player_predictor = Model(4, 6, 1, [512, 512, 512, 512], len(player)).to(device)
+    train_predictor(predictor=player_predictor, train_buff=buff, test_buff=test_buff, epochs=10, target_start=0,
+                    target_len=1, label='player', batch_size=wandb.config.predictor_batchsize)
 
-    ball_predictor = TemporalConvNet(11, [512, 512, 512, 512, len(ball)]).to(device)
-    train_predictor(predictor=ball_predictor, test_buff=buff, train_buff=test_buff, indices=ball, epochs=20,
-                    label='ball', batch_size=wandb.config.predictor_batchsize)
-
-    enemy_predictor = TemporalConvNet(11, [512, 512, 512, 512, len(enemy)]).to(device)
-    train_predictor(predictor=enemy_predictor, test_buff=buff, train_buff=test_buff, indices=enemy, epochs=10,
-                    label='enemy', batch_size=wandb.config.predictor_batchsize)
-
-    all_predictor = TemporalConvNet(11, [512, 512, 512, 512, len(all)]).to(device)
-    train_predictor(predictor=all_predictor, test_buff=buff, train_buff=test_buff, indices=all, epochs=20,
-                    label='all', batch_size=wandb.config.predictor_batchsize)
+    # ball_predictor = TemporalConvNet(11, [512, 512, 512, 512, len(ball)]).to(device)
+    # train_predictor(predictor=ball_predictor, test_buff=buff, train_buff=test_buff, indices=ball, epochs=20,
+    #                 label='ball', batch_size=wandb.config.predictor_batchsize)
+    #
+    # enemy_predictor = TemporalConvNet(11, [512, 512, 512, 512, len(enemy)]).to(device)
+    # train_predictor(predictor=enemy_predictor, test_buff=buff, train_buff=test_buff, indices=enemy, epochs=10,
+    #                 label='enemy', batch_size=wandb.config.predictor_batchsize)
+    #
+    # all_predictor = TemporalConvNet(11, [512, 512, 512, 512, len(all)]).to(device)
+    # train_predictor(predictor=all_predictor, test_buff=buff, train_buff=test_buff, indices=all, epochs=20,
+    #                 label='all', batch_size=wandb.config.predictor_batchsize)
 
 
 if __name__ == '__main__':

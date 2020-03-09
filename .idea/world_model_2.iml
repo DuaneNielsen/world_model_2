@@ -12,4 +12,10 @@
     <orderEntry type="module" module-name="iic" />
     <orderEntry type="module" module-name="cma-es" />
   </component>
+  <component name="PackageRequirementsSettings">
+    <option name="requirementsPath" value="" />
+  </component>
+  <component name="TestRunnerService">
+    <option name="PROJECT_TEST_RUNNER" value="pytest" />
+  </component>
 </module>

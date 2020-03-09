@@ -76,3 +76,24 @@ class TemporalConvNet(nn.Module):
 
     def forward(self, x):
         return self.network(x)
+
+
+class Model(nn.Module):
+    def __init__(self, state_dims, action_dims, reward_dims, hidden_layers, output_dims):
+        super().__init__()
+        self.state_dims = state_dims
+        self.action_dims = action_dims
+        self.reward_dims = reward_dims
+        self.hidden_layers = hidden_layers
+        self.output_dims = output_dims
+        input_channels = self.state_dims + self.action_dims + self.reward_dims
+        hidden_layers += [output_dims]
+        self.tcn = TemporalConvNet(input_channels, hidden_layers)
+
+    def forward(self, state, action):
+        inp = torch.cat((state, action), dim=2)
+        inp = inp.permute(0, 2, 1)
+        out = self.tcn(inp)
+        return out.permute(0, 2, 1)
+
+
