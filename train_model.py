@@ -5,7 +5,7 @@ import wm2.env.wrappers as wrappers
 from keypoints.utils import UniImageViewer
 import torch
 
-from utils import TensorNamespace, Pbar, SARI, one_hot
+from utils import TensorNamespace, Pbar, SARI, one_hot, gaussian_like_function, debug_image
 from wm2.models.causal import Model
 from torch.optim import Adam
 import torch.nn as nn
@@ -378,7 +378,7 @@ def autoregress(state, action, reward, mask, target_start=0, target_length=None,
 
 
 
-def train_predictor(predictor, train_buff, test_buff, epochs, target_start, target_len, label, batch_size, test_freq=1):
+def train_predictor(predictor, train_buff, test_buff, epochs, target_start, target_len, label, batch_size, test_freq=50):
     train, test = SARDataset(train_buff), SARDataset(test_buff)
     pbar = Pbar(epochs=epochs, train_len=len(train), batch_size=batch_size, label=label)
     train = DataLoader(train, batch_size=batch_size, collate_fn=pad_collate)
@@ -395,8 +395,7 @@ def train_predictor(predictor, train_buff, test_buff, epochs, target_start, targ
             loss = (((seqs.target - estimate) * seqs.mask) ** 2).mean()
             loss.backward()
             optim.step()
-            wandb.log({f'{label}_train_loss': loss.item()})
-            pbar.update_train_loss(loss)
+            pbar.update_train_loss(loss, model=predictor)
 
         if epoch % test_freq == 0:
             with torch.no_grad():
@@ -404,8 +403,26 @@ def train_predictor(predictor, train_buff, test_buff, epochs, target_start, targ
                     seqs = autoregress(mb.state, mb.action, mb.reward, mb.mask, target_start, target_len).to(device)
                     estimate = predictor(seqs.source, seqs.action)
                     loss = (((seqs.target - estimate) * seqs.mask) ** 2).mean()
-                    wandb.log({f'{label}_test_loss': loss.item()})
-                    pbar.update_test_loss(loss)
+                    pbar.update_test_loss(loss, model=predictor)
+                    for step in estimate[0][0:160].cpu().numpy():
+
+                        if label == 'all':
+                            pos = np.array([[0.0, 0.2], [0.0, 0.8], [0.0, 0.0]])
+                            pos[0, 0] = step[0]
+                            pos[1, 0] = step[1]
+                            pos[2] = step[2:4]
+                        elif label == 'player':
+                            pos = np.array([[0.0, 0.8]])
+                            pos[0, 0] = step[0]
+                        elif label == 'enemy':
+                            pos = np.array([[0.0, 0.2]])
+                            pos[0, 0] = step[0]
+                        elif label == 'ball':
+                            pos = np.expand_dims(step, axis=0)
+
+                        probmap = gaussian_like_function(pos, 800, 800, sigma=0.2)
+                        image = (probmap * 255).astype(np.uint)
+                        debug_image(image, block=False)
 
     pbar.close()
 
@@ -419,7 +436,7 @@ def load_or_generate(env, n, path=None):
                 if len(buff) == n:
                     return buff
 
-    buff = gather_data(len, env, wandb.config.render)
+    buff = gather_data(n, env, wandb.config.render)
     if path is not None:
         with Path(path).open('wb') as f:
             pickle.dump(buff, f)

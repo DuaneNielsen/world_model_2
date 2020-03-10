@@ -1,6 +1,6 @@
 from train_model import SARDataset
 from train_model import gather_data, pad_collate, chomp
-from utils import one_hot
+from utils import gaussian_like_function, debug_image
 import gym
 from env import wrappers
 from atariari.benchmark.wrapper import AtariARIWrapper
@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 from torch.utils.data import DataLoader
 import torch
+from pyrr import rectangle
 
 @pytest.fixture
 def buffer():
@@ -44,6 +45,20 @@ def test_pad_collateSAR(buffer):
         assert torch.allclose(torch.sum(target * mask), torch.sum(target))
         mask_rolled = torch.cat((torch.ones_like(mask[:, 0, :].unsqueeze(1)), mask[:, :-1, :]), dim=1)
         assert torch.allclose(torch.sum(source * mask_rolled), torch.sum(source))
+
+def test_rect():
+    rect = rectangle.create()
+    debug_image(rect, block=True)
+
+def test_gaussian():
+    pos = []
+    labels = [(0.1, 0.1)]
+    for y, x in labels:
+        pos.append(np.array([y, x]))
+    pos = np.stack(pos, axis=0)
+    probmap = gaussian_like_function(pos, 240, 240, sigma=0.2)
+    image = (probmap * 255).astype(np.uint)
+    debug_image(image, block=True)
 
     # trajectory = buffer.trajectories[0]
     #

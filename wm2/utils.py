@@ -1,8 +1,15 @@
 from collections import deque
 from statistics import mean
 from types import SimpleNamespace
+from pathlib import Path
+import sys
+from datetime import datetime
+from math import floor
 
+import wandb
+import cv2
 import numpy as np
+import torch
 from torch.utils.data import Subset
 from tqdm import tqdm
 
@@ -18,7 +25,7 @@ class TensorNamespace(SimpleNamespace):
 
 
 class Pbar:
-    def __init__(self, epochs, train_len, batch_size, label, train_depth=None):
+    def __init__(self, epochs, train_len, batch_size, label, train_depth=None, checkpoint_secs=20):
         """
 
         :param epochs: number of epochs to train
@@ -26,6 +33,7 @@ class Pbar:
         :param batch_size: items per batch
         :param label: a label to display on the progress bar
         :param train_depth: the previous number of training losses to average to display the training loss
+        :param checkpoint_secs: the number of seconds before saving a checkpoint
         if not set will default to 10 or the number of minibatches per epoch, whichever is lower
         """
         self.bar = tqdm(total=epochs * train_len)
@@ -36,18 +44,30 @@ class Pbar:
         self.test_loss = 0.0
         self.train_loss = 0.0
         self.batch_size = batch_size
+        self.best_loss = sys.float_info.max
+        self.start_sec = floor(datetime.now().timestamp())
+        self.checkpoint_secs = checkpoint_secs
 
-    def update_test_loss(self, loss):
-        self.test.append(loss.item())
-        self.test_loss = mean(list(self.test))
-        self.bar.set_description(f'{self.label} train_loss: {self.train_loss:.6f} test_loss: {self.test_loss:.6f}')
-
-    def update_train_loss(self, loss):
+    def update_train_loss(self, loss, model=None):
         self.test = []
         self.loss_move_ave.append(loss.item())
         self.train_loss = mean(list(self.loss_move_ave))
         self.bar.update(self.batch_size)
+        wandb.log({f'{self.label}_train_loss': loss.item()})
         self.bar.set_description(f'{self.label} train_loss: {self.train_loss:.6f} test_loss: {self.test_loss:.6f}')
+        run_time = floor(datetime.now().timestamp()) - self.start_sec
+        if model is not None and run_time % self.checkpoint_secs == 0:
+            torch.save(model.state_dict(), str(Path(wandb.run.dir) / Path(f'{self.label}_checkpoint.pt')))
+
+    def update_test_loss(self, loss, model=None):
+        self.test.append(loss.item())
+        self.test_loss = mean(list(self.test))
+        wandb.log({f'{self.label}_test_loss': loss.item()})
+        self.bar.set_description(f'{self.label} train_loss: {self.train_loss:.6f} test_loss: {self.test_loss:.6f}')
+        if model is not None:
+            if loss.item() < self.best_loss:
+                self.best_loss = loss.item()
+                torch.save(model.state_dict(), str(Path(wandb.run.dir) / Path(f'{self.label}_best.pt')))
 
     def close(self):
         self.bar.close()
@@ -74,3 +94,57 @@ def split(data, train_len, test_len):
     train = Subset(data, range(0, train_len))
     test = Subset(data, range(train_len, total_len))
     return train, test
+
+
+def squared_diff(h, len):
+    """
+    keypoints, K
+    :param h: K, 1
+    :param len: integer
+    :return: heightmap
+    """
+    ls = np.linspace(0, 1, len, dtype=h.dtype)
+    ls = np.expand_dims(ls, axis=0).repeat(repeats=h.shape[0], axis=0)
+    hm = np.expand_dims(h, axis=0).repeat(repeats=len, axis=0).T
+    hm = ls - hm
+    return hm ** 2
+
+
+def gaussian_like_function(kp, height, width, sigma=0.1, eps=1e-6):
+    hm = squared_diff(kp[:, 0], height)
+    wm = squared_diff(kp[:, 1], width)
+    hm = hm[:, :, np.newaxis]
+    hm = np.repeat(hm, repeats=width, axis=2)
+    wm = wm[:, np.newaxis, :]
+    wm = np.repeat(wm, repeats=height, axis=1)
+    gm = - np.sqrt(hm + wm + eps) / (2 * sigma ** 2)
+    gm = np.exp(gm)
+    return gm
+
+
+def to_opencv_image(im):
+    '''Convert to OpenCV image shape h,w,c'''
+    shape = im.shape
+    if len(shape) == 3 and shape[0] < shape[-1]:
+        return im.transpose(1, 2, 0)
+    else:
+        return im
+
+
+def debug_image(im, block=True):
+    '''
+    Renders an image for debugging; pauses process until key press
+    Handles tensor/numpy and conventions among libraries
+    '''
+    if torch.is_tensor(im):  # if PyTorch tensor, get numpy
+        im = im.cpu().numpy()
+    im = to_opencv_image(im)
+    im = im.astype(np.uint8)  # typecast guard
+    if im.shape[0] == 3:  # RGB image
+        # accommodate from RGB (numpy) to BGR (cv2)
+        im = cv2.cvtColor(im, cv2.COLOR_BGR2RGB)
+    cv2.imshow('debug image', im)
+    if block:
+        cv2.waitKey(0)
+    else:
+        cv2.waitKey(10)
