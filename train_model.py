@@ -1,3 +1,5 @@
+from math import pi
+
 import gym
 import numpy as np
 from atariari.benchmark.wrapper import AtariARIWrapper
@@ -21,6 +23,7 @@ from time import sleep
 from types import SimpleNamespace
 import pickle
 from pathlib import Path
+from math import floor
 
 viewer = UniImageViewer()
 
@@ -184,6 +187,33 @@ class PrePro():
         return torch.from_numpy(np.concatenate(list(self.history)))
 
 
+def multivariate_diag_gaussian(mu, stdev, size):
+    """
+
+    :param mu: mean (N, D)
+    :param stdev: std-deviation (not variance!) (N, D)
+    :param size: tuple of output dimension sizes eg: (h, w)
+    :return: a heightmap
+    """
+    N = mu.size(0)
+    D = mu.size(1)
+    axes = [torch.linspace(0, 1.0, size[i], dtype=mu.dtype, device=mu.device) for i in range(D)]
+    grid = torch.meshgrid(axes)
+    grid = torch.stack(grid)
+    gridshape = grid.shape[1:]
+    grid = grid.flatten(start_dim=1)
+    eps = torch.finfo(mu.dtype).eps
+    stdev[stdev < eps] = stdev[stdev < eps] + eps
+
+    constant = torch.tensor((2 * pi) ** D).sqrt() * torch.prod(stdev, dim=1)
+    numerator = (grid.view(1, D, -1) - mu.view(N, D, 1)) ** 2
+    denominator = 2 * stdev ** 2
+    exponent = - torch.sum(numerator / denominator.view(N, D, 1), dim=1)
+    exponent = torch.exp(exponent)
+    height = exponent / constant
+    return height.reshape(N, *gridshape)
+
+
 def sample_action(state, policy, prepro, env, eps):
     if random.uniform(0.0, 1.0) > eps:
         # s = torch.from_numpy(state.__array__()).unsqueeze(0).float()
@@ -246,7 +276,7 @@ def train_reward(buff, test_buff, epochs, test_freq=2):
             loss.backward()
             optim.step()
             wandb.log({'reward_loss': loss.item()})
-            pbar.update_train_loss(loss)
+            pbar.update_train_loss_and_checkpoint(loss)
 
         if epoch % test_freq == 0:
             with torch.no_grad():
@@ -254,7 +284,7 @@ def train_reward(buff, test_buff, epochs, test_freq=2):
                     estimate = model(source)
                     loss = ((target - estimate) ** 2).mean()
                     wandb.log({'reward_loss': loss.item()})
-                    pbar.update_test_loss(loss)
+                    pbar.update_test_loss_and_save_model(loss)
     pbar.close()
 
 
@@ -284,7 +314,7 @@ def train_done(buff, test_buff, epochs, test_freq):
             loss.backward()
             optim.step()
             wandb.log({'done_loss': loss.item()})
-            pbar.update_train_loss(loss)
+            pbar.update_train_loss_and_checkpoint(loss)
 
         if epoch % test_freq == 0:
             with torch.no_grad():
@@ -292,7 +322,7 @@ def train_done(buff, test_buff, epochs, test_freq):
                     estimate = model(source)
                     loss = criterion(target, estimate)
                     wandb.log({'done_loss': loss.item()})
-                    pbar.update_test_loss(loss)
+                    pbar.update_test_loss_and_save_model(loss)
     pbar.close()
 
 
@@ -311,7 +341,7 @@ def pad(batch, longest):
     for trajectory in batch:
         pad_len = longest - trajectory['state'].shape[0]
         padding = [(0, pad_len)]  # right pad only the first dim
-        padding += [(0, 0) for _ in range(len(trajectory['state'].shape)-1)]
+        padding += [(0, 0) for _ in range(len(trajectory['state'].shape) - 1)]
 
         for key in trajectory:
             if key not in params:
@@ -375,55 +405,6 @@ def autoregress(state, action, reward, mask, target_start=0, target_length=None,
     ret['mask'] = chomp(mask, 'left', dim=1, bite_size=advance)
     return TensorNamespace(**ret)
 
-
-
-
-def train_predictor(predictor, train_buff, test_buff, epochs, target_start, target_len, label, batch_size, test_freq=50):
-    train, test = SARDataset(train_buff), SARDataset(test_buff)
-    pbar = Pbar(epochs=epochs, train_len=len(train), batch_size=batch_size, label=label)
-    train = DataLoader(train, batch_size=batch_size, collate_fn=pad_collate)
-    test = DataLoader(test, batch_size=wandb.config.test_len, collate_fn=pad_collate)
-
-    optim = Adam(predictor.parameters(), lr=1e-4)
-
-    for epoch in range(epochs):
-
-        for mb in train:
-            seqs = autoregress(mb.state, mb.action, mb.reward, mb.mask, target_start, target_len).to(device)
-            optim.zero_grad()
-            estimate = predictor(seqs.source, seqs.action)
-            loss = (((seqs.target - estimate) * seqs.mask) ** 2).mean()
-            loss.backward()
-            optim.step()
-            pbar.update_train_loss(loss, model=predictor)
-
-        if epoch % test_freq == 0:
-            with torch.no_grad():
-                for mb in test:
-                    seqs = autoregress(mb.state, mb.action, mb.reward, mb.mask, target_start, target_len).to(device)
-                    estimate = predictor(seqs.source, seqs.action)
-                    loss = (((seqs.target - estimate) * seqs.mask) ** 2).mean()
-                    pbar.update_test_loss(loss, model=predictor)
-                    for step in estimate[0][0:160].cpu().numpy():
-
-                        if label == 'all':
-                            pos = np.array([[0.0, 0.2], [0.0, 0.8], [0.0, 0.0]])
-                            pos[0, 0] = step[0]
-                            pos[1, 0] = step[1]
-                            pos[2] = step[2:4]
-                        elif label == 'player':
-                            pos = np.array([[0.0, 0.8]])
-                            pos[0, 0] = step[0]
-                        elif label == 'enemy':
-                            pos = np.array([[0.0, 0.2]])
-                            pos[0, 0] = step[0]
-                        elif label == 'ball':
-                            pos = np.expand_dims(step, axis=0)
-
-                        probmap = gaussian_like_function(pos, 800, 800, sigma=0.2)
-                        image = (probmap * 255).astype(np.uint)
-                        debug_image(image, block=False)
-
     pbar.close()
 
 
@@ -442,6 +423,85 @@ def load_or_generate(env, n, path=None):
             pickle.dump(buff, f)
     return buff
 
+def display_predictions(trajectory, label, max_length=160):
+    length = min(len(trajectory), max_length)
+    for step in trajectory[0:length]:
+        image_size = (240 * 4, 160 * 4)
+
+        def strip_index(center, thickness, length):
+            center = floor(center * length)
+            thickness = floor(thickness * length // 2)
+            lower, upper = center - thickness, center + thickness
+            return lower, upper
+
+        def put_strip(step, center, thickness, image_size, dim):
+            image = np.zeros(image_size)
+            stdev = torch.tensor([[0.05]], device=device)
+            strip = multivariate_diag_gaussian(step.view(1, -1), stdev, image_size)
+            strip = strip.cpu().numpy()
+            lower, upper = strip_index(center, thickness, image_size[dim])
+            if dim == 1:
+                image[:, lower:upper] = strip.T
+            elif dim == 0:
+                image[lower:upper, :] = strip
+            image = ((image / np.max(image)) * 255).astype(np.uint)
+            return image
+
+        def put_gaussian(step, image_size):
+            stdev = torch.tensor([[0.05, 0.05]], device=device)
+            point = multivariate_diag_gaussian(step.view(1, -1), stdev, image_size)
+            image = point.cpu().numpy()
+            image = ((image / np.max(image)) * 255).astype(np.uint)
+            return image
+
+        if label == 'all':
+            player = put_strip(step[0], 0.9, 0.05, image_size, dim=1)
+            enemy = put_strip(step[1], 0.3, 0.05, image_size, dim=1)
+            ball = put_gaussian(step[2:4], image_size)
+            image = np.stack((player, enemy, ball.squeeze()))
+
+        elif label == 'player':
+            image = put_strip(step, 0.9, 0.05, image_size, dim=1)
+
+        elif label == 'enemy':
+            image = put_strip(step, 0.3, 0.05, image_size, dim=1)
+
+        elif label == 'ball':
+            image = put_gaussian(step, image_size)
+        else:
+            raise Exception(f'label {label} not found')
+
+        debug_image(image, block=False)
+
+def train_predictor(predictor, train_buff, test_buff, epochs, target_start, target_len, label, batch_size,
+                    test_freq=50):
+    train, test = SARDataset(train_buff), SARDataset(test_buff)
+    pbar = Pbar(epochs=epochs, train_len=len(train), batch_size=batch_size, label=label)
+    train = DataLoader(train, batch_size=batch_size, collate_fn=pad_collate)
+    test = DataLoader(test, batch_size=wandb.config.test_len, collate_fn=pad_collate)
+
+    optim = Adam(predictor.parameters(), lr=1e-4)
+
+    for epoch in range(epochs):
+
+        for mb in train:
+            seqs = autoregress(mb.state, mb.action, mb.reward, mb.mask, target_start, target_len).to(device)
+            optim.zero_grad()
+            estimate = predictor(seqs.source, seqs.action)
+            loss = (((seqs.target - estimate) * seqs.mask) ** 2).mean()
+            loss.backward()
+            optim.step()
+            pbar.update_train_loss_and_checkpoint(loss, model=predictor)
+
+        if epoch % test_freq == 0:
+            with torch.no_grad():
+                for mb in test:
+                    seqs = autoregress(mb.state, mb.action, mb.reward, mb.mask, target_start, target_len).to(device)
+                    estimate = predictor(seqs.source, seqs.action)
+                    loss = (((seqs.target - estimate) * seqs.mask) ** 2).mean()
+                    pbar.update_test_loss_and_save_model(loss, model=predictor)
+                    display_predictions(estimate[0], label)
+
 def main():
 
     env = gym.make('PongNoFrameskip-v4')
@@ -451,32 +511,71 @@ def main():
     env = wrappers.AtariAriVector(env)
     env = wrappers.FireResetEnv(env)
 
-    train_buff = load_or_generate(env, wandb.config.train_len, 'data/buff.pkl')
-    test_buff = load_or_generate(env, wandb.config.test_len, 'data/test_buff.pkl')
-
+    # load dataset from file if already saved
+    train_buff_path = Path(f'data/{wandb.config.mode}/train_buff.pkl')
+    test_buff_path = Path(f'data/{wandb.config.mode}/test_buff.pkl')
+    train_buff_path.parent.mkdir(parents=True, exist_ok=True)
+    test_buff_path.parent.mkdir(parents=True, exist_ok=True)
+    train_buff = load_or_generate(env, wandb.config.train_len, str(train_buff_path))
+    test_buff = load_or_generate(env, wandb.config.test_len, str(test_buff_path))
 
     state_dims = 4
     action_dims = 6
     reward_dims = 1
 
     ensemble = {}
-    ensemble['all'] = SimpleNamespace(hidden=[512, 512, 512, 512], epochs=1000, target_start=0, target_len=4)
-    ensemble['player'] = SimpleNamespace(hidden=[512, 512, 512, 512], epochs=500, target_start=0, target_len=1)
-    ensemble['enemy'] = SimpleNamespace(hidden=[512, 512, 512, 512], epochs=1000, target_start=1, target_len=1)
-    ensemble['ball'] = SimpleNamespace(hidden=[512, 512, 512, 512], epochs=1000, target_start=2, target_len=2)
+    ensemble['all'] = SimpleNamespace(hidden=[512, 512, 512, 512], epochs=1000, target_start=0, target_len=4, x_pos=None)
+    ensemble['player'] = SimpleNamespace(hidden=[512, 512, 512, 512], epochs=500, target_start=0, target_len=1, x_pos=0.1)
+    ensemble['enemy'] = SimpleNamespace(hidden=[512, 512, 512, 512], epochs=1000, target_start=1, target_len=1, x_pos=0.9)
+    ensemble['ball'] = SimpleNamespace(hidden=[512, 512, 512, 512], epochs=1000, target_start=2, target_len=2,
+                                      x_pos=None)
 
     # train_reward(buff, test_buff, epochs=10, test_freq=3)
     # train_done(buff, test_buff, epochs=10, test_freq=3)
 
-    for label, args in ensemble.items():
-        predictor = Model(state_dims, action_dims, reward_dims, args.hidden, args.target_len).to(device)
-        train_predictor(predictor=predictor, train_buff=train_buff, test_buff=test_buff, epochs=args.epochs,
-                        target_start=args.target_start,
-                        target_len=args.target_len, label=label, batch_size=wandb.config.predictor_batchsize)
+    demo = True
+    load_dir = './wandb/dryrun-20200314_234615-0sxdtkko'
+
+    if demo:
+
+        test = SARDataset(test_buff)
+        test = DataLoader(test, batch_size=wandb.config.test_len, collate_fn=pad_collate)
+        predictor = {}
+
+        with torch.no_grad():
+            for label, args in ensemble.items():
+                model = Model(state_dims, action_dims, reward_dims, args.hidden, args.target_len).to(device)
+                state_dict = Pbar.best_state_dict(load_dir, label)
+                model.load_state_dict(state_dict)
+                predictor[label] = model
+
+            for mb in test:
+                seqs = autoregress(mb.state, mb.action, mb.reward, mb.mask, args.target_start, args.target_len).to(device)
+                estimate = predictor['all'](seqs.source, seqs.action)
+                display_predictions(estimate[0], 'all', max_length=10)
+
+            for mb in test:
+                seqs = autoregress(mb.state, mb.action, mb.reward, mb.mask, args.target_start, args.target_len).to(device)
+                estimate_player = predictor['player'](seqs.source, seqs.action)
+                estimate_enemy = predictor['enemy'](seqs.source, seqs.action)
+                estimate_ball = predictor['ball'](seqs.source, seqs.action)
+                estimate = torch.cat((estimate_player, estimate_enemy, estimate_ball), dim=2)
+                display_predictions(estimate[0], 'all', max_length=2000)
+
+    else:
+
+        for label, args in ensemble.items():
+            predictor = Model(state_dims, action_dims, reward_dims, args.hidden, args.target_len).to(device)
+            train_predictor(predictor=predictor, train_buff=train_buff, test_buff=test_buff, epochs=args.epochs,
+                            target_start=args.target_start,
+                            target_len=args.target_len, label=label, batch_size=wandb.config.predictor_batchsize)
+
+
 
 
 if __name__ == '__main__':
-    defaults = dict(frame_op_len=8,
+    defaults = dict(mode='test',
+                    frame_op_len=8,
                     train_len=64,
                     test_len=16,
                     predictor_batchsize=32,
@@ -487,7 +586,8 @@ if __name__ == '__main__':
                     done_batchsize=32,
                     test_freq=10)
 
-    dev = dict(frame_op_len=8,
+    dev = dict(mode='dev',
+               frame_op_len=8,
                train_len=2,
                test_len=2,
                predictor_batchsize=2,
@@ -498,7 +598,7 @@ if __name__ == '__main__':
                done_batchsize=256,
                test_freq=10)
 
-    wandb.init(config=defaults)
+    wandb.init(config=dev)
 
     # config validations
     config = wandb.config

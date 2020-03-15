@@ -1,4 +1,4 @@
-from train_model import SARDataset
+from train_model import SARDataset, multivariate_diag_gaussian
 from train_model import gather_data, pad_collate, chomp
 from utils import gaussian_like_function, debug_image
 import gym
@@ -9,6 +9,7 @@ import pytest
 from torch.utils.data import DataLoader
 import torch
 from pyrr import rectangle
+from math import pi
 
 @pytest.fixture
 def buffer():
@@ -59,6 +60,80 @@ def test_gaussian():
     probmap = gaussian_like_function(pos, 240, 240, sigma=0.2)
     image = (probmap * 255).astype(np.uint)
     debug_image(image, block=True)
+
+
+# def gaussian_like_function(kp, height, width, sigma=0.1, eps=1e-6):
+#     hm = squared_diff(kp[:, 0], height)
+#     wm = squared_diff(kp[:, 1], width)
+#     hm = hm[:, :, np.newaxis]
+#     hm = np.repeat(hm, repeats=width, axis=2)
+#     wm = wm[:, np.newaxis, :]
+#     wm = np.repeat(wm, repeats=height, axis=1)
+#     gm = - np.sqrt(hm + wm + eps) / (2 * sigma ** 2)
+#     gm = np.exp(gm)
+#     return gm
+
+
+def gaussian2Dd(mu, sigma, size):
+
+    D = mu.size(0)
+    axes = [torch.linspace(0, 1.0, size) for _ in range(D)]
+    grid = torch.meshgrid(axes)
+    grid = torch.stack(grid)
+    gridshape = grid.shape[1:]
+    grid = grid.flatten(start_dim=1)
+    eps = torch.finfo(mu.dtype).eps
+    sigma = sigma + eps
+
+    constant = 1 / torch.sqrt(2 * pi * torch.prod(sigma))
+    #
+    N = grid.size(1)
+    m = grid - mu.view(-1, 1)
+    m = m.view(-1, 1, D)
+    inv_covar = torch.diag_embed(1 / sigma)
+    exponent = - 0.5 * torch.matmul(m, inv_covar).matmul(m.permute(0, 2, 1))
+    gaussian = constant * torch.exp(exponent)
+    return gaussian.squeeze().reshape(1, *gridshape)
+
+    # axes = []
+    # for axis in grid:
+    #     exponent = -1 * (x_axis - mu) ** 2 / (2 * sigma ** 2)
+    #
+    #     y = constant * torch.exp(exponent)
+    #     axes.append(y)
+
+    # h = torch.sum(torch.stack(axes), dim=0)
+    # gm = -torch.sqrt(torch.cumprod())
+
+    # return gm
+
+def gaussian2dw(mu, sigma, size):
+    D = mu.size(0)
+    axes = [torch.linspace(0, 1.0, size) for _ in range(D)]
+    x, y = torch.meshgrid(axes)
+    #grid = torch.stack(grid)
+    #gridshape = grid.shape[1:]
+    #grid = grid.flatten(start_dim=1)
+    eps = torch.finfo(mu.dtype).eps
+    sigma = sigma + eps
+
+    constant = 1 / torch.sqrt(2 * pi * torch.prod(sigma))
+
+    x, y = (x - mu[0]) ** 2 / (2 * sigma[0] ** 2), (y - mu[1]) ** 2 / (2 * sigma[1] ** 2)
+    exponent = torch.exp(- x - y)
+    return constant * exponent
+
+
+def test_multivariate_gaussian():
+    mu = torch.tensor([[0.5, 0.5]])
+    stdev = torch.tensor([[0.1, 0.3]])
+
+    image = multivariate_diag_gaussian(mu, stdev, (40, 20))
+    image = image.numpy()
+    image = (image / image.max() * 255).astype(np.uint)
+    debug_image(image, block=True)
+
+
 
     # trajectory = buffer.trajectories[0]
     #

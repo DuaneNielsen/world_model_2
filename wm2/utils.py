@@ -48,7 +48,7 @@ class Pbar:
         self.start_sec = floor(datetime.now().timestamp())
         self.checkpoint_secs = checkpoint_secs
 
-    def update_train_loss(self, loss, model=None):
+    def update_train_loss_and_checkpoint(self, loss, model=None):
         self.test = []
         self.loss_move_ave.append(loss.item())
         self.train_loss = mean(list(self.loss_move_ave))
@@ -59,7 +59,7 @@ class Pbar:
         if model is not None and run_time % self.checkpoint_secs == 0:
             torch.save(model.state_dict(), str(Path(wandb.run.dir) / Path(f'{self.label}_checkpoint.pt')))
 
-    def update_test_loss(self, loss, model=None):
+    def update_test_loss_and_save_model(self, loss, model=None):
         self.test.append(loss.item())
         self.test_loss = mean(list(self.test))
         wandb.log({f'{self.label}_test_loss': loss.item()})
@@ -71,6 +71,16 @@ class Pbar:
 
     def close(self):
         self.bar.close()
+
+    @staticmethod
+    def best_state_dict(wandb_run_dir, label):
+        f = str(Path(wandb_run_dir) / Path(f'{label}_best.pt'))
+        return torch.load(f)
+
+    @staticmethod
+    def checkpoint(wandb_run_dir, label):
+        f = str(Path(wandb_run_dir) / Path(f'{label}_best.pt'))
+        return torch.load(f)
 
 
 class SARI:
