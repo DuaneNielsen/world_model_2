@@ -25,7 +25,7 @@ class TensorNamespace(SimpleNamespace):
 
 
 class Pbar:
-    def __init__(self, epochs, train_len, batch_size, label, train_depth=None, checkpoint_secs=20):
+    def __init__(self, epochs, train_len, batch_size, label, train_depth=None, checkpoint_secs=60):
         """
 
         :param epochs: number of epochs to train
@@ -45,19 +45,22 @@ class Pbar:
         self.train_loss = 0.0
         self.batch_size = batch_size
         self.best_loss = sys.float_info.max
-        self.start_sec = floor(datetime.now().timestamp())
-        self.checkpoint_secs = checkpoint_secs
+        self.checkpoint_cooldown = Cooldown(checkpoint_secs)
 
-    def update_train_loss_and_checkpoint(self, loss, model=None):
+
+    def update_train_loss_and_checkpoint(self, loss, model=None, epoch=None, optimizer=None):
         self.test = []
         self.loss_move_ave.append(loss.item())
         self.train_loss = mean(list(self.loss_move_ave))
         self.bar.update(self.batch_size)
         wandb.log({f'{self.label}_train_loss': loss.item()})
         self.bar.set_description(f'{self.label} train_loss: {self.train_loss:.6f} test_loss: {self.test_loss:.6f}')
-        run_time = floor(datetime.now().timestamp()) - self.start_sec
-        if model is not None and run_time % self.checkpoint_secs == 0:
-            torch.save(model.state_dict(), str(Path(wandb.run.dir) / Path(f'{self.label}_checkpoint.pt')))
+        if model is not None and self.checkpoint_cooldown:
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+            }, str(Path(wandb.run.dir) / Path(f'{self.label}_checkpoint.pt')))
 
     def update_test_loss_and_save_model(self, loss, model=None):
         self.test.append(loss.item())
@@ -81,6 +84,25 @@ class Pbar:
     def checkpoint(wandb_run_dir, label):
         f = str(Path(wandb_run_dir) / Path(f'{label}_best.pt'))
         return torch.load(f)
+
+
+class Cooldown:
+    def __init__(self, secs=None):
+        """
+        Cooldown timer. to use, just construct and call it with the number of seconds you want to wait
+        default is 1 minute, first time it returns true
+        """
+        self.last_cooldown = 0
+        self.default_cooldown = 60 if secs is None else secs
+
+    def __call__(self, secs=None):
+        secs = self.default_cooldown if secs is None else secs
+        now = floor(datetime.now().timestamp())
+        run_time = now - self.last_cooldown
+        expired = run_time > secs
+        if expired:
+            self.last_cooldown = now
+        return expired
 
 
 class SARI:
