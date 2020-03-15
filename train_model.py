@@ -424,7 +424,7 @@ def load_or_generate(env, n, path=None):
     return buff
 
 def display_predictions(trajectory, label, max_length=160):
-    length = min(len(trajectory), max_length)
+    length = min(trajectory.size(0), max_length)
     for step in trajectory[0:length]:
         image_size = (240 * 4, 160 * 4)
 
@@ -552,7 +552,7 @@ def main():
             for mb in test:
                 seqs = autoregress(mb.state, mb.action, mb.reward, mb.mask, args.target_start, args.target_len).to(device)
                 estimate = predictor['all'](seqs.source, seqs.action)
-                display_predictions(estimate[0], 'all', max_length=10)
+                display_predictions(estimate[0], 'all', max_length=150)
 
             for mb in test:
                 seqs = autoregress(mb.state, mb.action, mb.reward, mb.mask, args.target_start, args.target_len).to(device)
@@ -560,7 +560,8 @@ def main():
                 estimate_enemy = predictor['enemy'](seqs.source, seqs.action)
                 estimate_ball = predictor['ball'](seqs.source, seqs.action)
                 estimate = torch.cat((estimate_player, estimate_enemy, estimate_ball), dim=2)
-                display_predictions(estimate[0], 'all', max_length=2000)
+                for trajectory in estimate:
+                    display_predictions(trajectory, 'all', max_length=300)
 
     else:
 
