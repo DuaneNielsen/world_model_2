@@ -20,6 +20,17 @@ def init(m):
         torch.nn.init.kaiming_uniform(m.bias)
 
 
+def init(m, init_func):
+    if isinstance(m, nn.Conv1d):
+        init_func(m.weight)
+        if m.bias is not None:
+            init_func(m.bias)
+    if isinstance(m, nn.Linear):
+        init_func(m.weight)
+        if m.bias is not None:
+            init_func(m.bias)
+
+
 class TemporalBlock(nn.Module):
     def __init__(self, n_inputs, n_outputs, kernel_size, stride, dilation, padding, dropout=0.2, nonlin=None):
         super(TemporalBlock, self).__init__()
@@ -78,7 +89,7 @@ class TemporalConvNet(nn.Module):
         return self.network(x)
 
 
-class Model(nn.Module):
+class Causal(nn.Module):
     def __init__(self, state_dims, action_dims, reward_dims, hidden_layers, output_dims):
         super().__init__()
         self.state_dims = state_dims
@@ -97,3 +108,26 @@ class Model(nn.Module):
         return out.permute(0, 2, 1)
 
 
+class TCMDN(nn.Module):
+    def __init__(self, state_dims, action_dims, reward_dims, hidden_layers, output_dims):
+        super().__init__()
+        self.state_dims = state_dims
+        self.action_dims = action_dims
+        self.reward_dims = reward_dims
+        self.hidden_layers = hidden_layers
+        self.output_dims = output_dims
+        input_channels = self.state_dims + self.action_dims + self.reward_dims
+        hidden_layers += [output_dims * 2]
+        self.tcn = TemporalConvNet(input_channels, hidden_layers)
+        self.mu_net = nn.Linear(output_dims, output_dims, bias=False)
+        self.stdev_net = nn.Linear(output_dims, output_dims, bias=False)
+
+    def forward(self, state, action):
+        inp = torch.cat((state, action), dim=2)
+        inp = inp.permute(0, 2, 1)
+        out = self.tcn(inp)
+        out = out.permute(0, 2, 1)
+        mu, stdev = out.chunk(2, dim=2)
+        mu = self.mu_net(mu)
+        stdev = self.stdev_net(stdev)
+        return mu, stdev

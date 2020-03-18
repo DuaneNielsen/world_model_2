@@ -5,6 +5,7 @@
       <sourceFolder url="file://$MODULE_DIR$/wm2" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/configs" />
       <excludeFolder url="file://$MODULE_DIR$/data" />
+      <excludeFolder url="file://$MODULE_DIR$/wandb" />
     </content>
     <orderEntry type="jdk" jdkName="Python 3.6 (keypoints)" jdkType="Python SDK" />
     <orderEntry type="sourceFolder" forTests="false" />

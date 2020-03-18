@@ -1,4 +1,10 @@
 from math import pi
+import random
+from time import sleep
+from types import SimpleNamespace
+import pickle
+from pathlib import Path
+from math import floor
 
 import gym
 import numpy as np
@@ -8,7 +14,7 @@ from keypoints.utils import UniImageViewer
 import torch
 
 from utils import TensorNamespace, Pbar, SARI, one_hot, gaussian_like_function, debug_image
-from wm2.models.causal import Model
+from wm2.models.causal import Causal
 from torch.optim import Adam
 import torch.nn as nn
 from torch.utils.data.dataset import Dataset
@@ -18,15 +24,12 @@ import wandb
 from tqdm import tqdm
 from collections import deque
 from torch.distributions import Categorical
-import random
-from time import sleep
-from types import SimpleNamespace
-import pickle
-from pathlib import Path
-from math import floor
 from torch.distributions import Normal, LogNormal
 from torch.nn.utils import clip_grad_norm_
 import utils
+import models.causal
+import torch.nn.functional as F
+from matplotlib import pyplot as plt
 
 viewer = UniImageViewer()
 
@@ -426,10 +429,9 @@ def load_or_generate(env, n, path=None):
             pickle.dump(buff, f)
     return buff
 
-def display_predictions(trajectory, label, max_length=160):
-    length = min(trajectory.size(0), max_length)
-    for step in trajectory[0:length]:
-        mu, stdev = step.chunk(2)
+def display_predictions(trajectory_mu, trajectory_stdev, label, max_length=160):
+    length = min(trajectory_mu.size(0), max_length)
+    for mu, stdev in zip(trajectory_mu[0:length], trajectory_stdev[0:length]):
         image_size = (240 * 4, 160 * 4)
 
         def strip_index(center, thickness, length):
@@ -478,49 +480,78 @@ def display_predictions(trajectory, label, max_length=160):
         debug_image(image, block=False)
 
 
-def train_predictor(predictor, train_buff, test_buff, epochs, target_start, target_len, label, batch_size,
+def train_predictor(mu_predictor, stdev_predictor, training, train_buff, test_buff, epochs, target_start, target_len, label, batch_size,
                     test_freq=50):
     train, test = SARDataset(train_buff), SARDataset(test_buff)
     pbar = Pbar(epochs=epochs, train_len=len(train), batch_size=batch_size, label=label)
-    train = DataLoader(train, batch_size=batch_size, collate_fn=pad_collate)
-    test = DataLoader(test, batch_size=wandb.config.test_len, collate_fn=pad_collate)
+    train = DataLoader(train, batch_size=batch_size, collate_fn=pad_collate, shuffle=True)
+    test = DataLoader(test, batch_size=wandb.config.test_len, collate_fn=pad_collate, shuffle=True)
 
-    optim = Adam(predictor.parameters(), lr=1e-4)
-    eps = torch.finfo(next(iter(predictor.parameters()))[0].data.dtype).eps
-    train_cooldown = utils.Cooldown()
+    if training == 'mu':
+        optim = Adam(mu_predictor.parameters(), lr=1e-4)
+    elif training == 'stdev':
+        optim = Adam(mu_predictor.parameters(), lr=1e-4)
+    else:
+        optim = None
+
+    eps = torch.finfo(next(iter(mu_predictor.parameters()))[0].data.dtype).eps
+    train_cooldown = utils.Cooldown(secs=wandb.config.display_cooldown)
+
+    def criterion(mu, stdev, target):
+        dist = Normal(mu, stdev + eps)
+        probs = dist.log_prob(target)
+        return -torch.mean(probs * seqs.mask), dist
+
+    def empirical_risk_criterion(estimate, target):
+        return (((seqs.target - estimate) * seqs.mask) ** 2).mean()
 
     for epoch in range(epochs):
 
         for mb in train:
             seqs = autoregress(mb.state, mb.action, mb.reward, mb.mask, target_start, target_len).to(device)
             optim.zero_grad()
-            params = predictor(seqs.source, seqs.action)
-            mu, sigma = params.chunk(2, dim=2)
-            dist = Normal(mu, sigma + eps)
-            probs = dist.log_prob(seqs.target)
-            probs = probs.clamp(max=1.5)
-            loss = -torch.mean(probs * seqs.mask)
-            #loss = (((seqs.target - estimate) * seqs.mask) ** 2).mean()
+            with torch.no_grad():
+                mu = mu_predictor(seqs.source, seqs.action)
+            stdev = stdev_predictor(seqs.source, seqs.action)
+            stdev = F.relu6(stdev)
+            loss, dist = criterion(mu, stdev, seqs.target)
             loss.backward()
-            clip_grad_norm_(predictor.parameters(), 0.25)
+
             optim.step()
-            wandb.log({f'train_{label}_entropy': dist.entropy().mean()})
-            pbar.update_train_loss_and_checkpoint(loss, model=predictor, epoch=epoch, optimizer=optim)
+            wandb.log({f'train_{label}_entropy': dist.entropy().mean(),
+                       f'train_{label}_stdev': stdev.mean()})
+            if training == 'mu':
+                pbar.update_train_loss_and_checkpoint(loss, model=mu_predictor, epoch=epoch, optimizer=optim)
+            else:
+                pbar.update_train_loss_and_checkpoint(loss, model=stdev_predictor, epoch=epoch, optimizer=optim)
 
         if train_cooldown():
             with torch.no_grad():
                 for mb in test:
                     seqs = autoregress(mb.state, mb.action, mb.reward, mb.mask, target_start, target_len).to(device)
-                    params = predictor(seqs.source, seqs.action)
-                    mu, sigma = params.chunk(2, dim=2)
-                    dist = Normal(mu, sigma + eps)
-                    probs = dist.log_prob(seqs.target)
-                    probs = probs.clamp(max=1.5)
-                    loss = -torch.mean(probs * seqs.mask)
-                    #loss = (((seqs.target - estimate) * seqs.mask) ** 2).mean()
+                    mu = mu_predictor(seqs.source, seqs.action)
+                    stdev = stdev_predictor(seqs.source, seqs.action)
+                    stdev = F.relu6(stdev)
+                    loss, dist = criterion(mu, stdev, seqs.target)
+
                     wandb.log({f'test_{label}_entropy': dist.entropy().mean()})
-                    pbar.update_test_loss_and_save_model(loss, model=predictor)
-                    display_predictions(params[0], label)
+                    if training == 'mu':
+                        pbar.update_test_loss_and_save_model(loss, model=mu_predictor)
+                    else:
+                        pbar.update_test_loss_and_save_model(loss, model=stdev_predictor)
+                    display_predictions(mu[0], stdev[0], label)
+
+
+class StaticStdev(nn.Module):
+    def __init__(self, state_dims, action_dims, reward_dims, hidden_layers, output_dims, stdev=0.1):
+        super().__init__()
+        self.output_dims = output_dims
+        self.stdev = stdev
+
+    def forward(self, state, actions):
+        return torch.full((state.size(0), state.size(1), self.output_dims),
+                          fill_value=self.stdev, requires_grad=False, dtype=state.dtype, device=state.device)
+
 
 def main():
 
@@ -544,17 +575,19 @@ def main():
     reward_dims = 1
 
     ensemble = {}
-    #ensemble['all'] = SimpleNamespace(hidden=[512, 512, 512, 512], epochs=4000, target_start=0, target_len=4)
-    ensemble['player'] = SimpleNamespace(hidden=[512, 512, 512, 512], epochs=4000, target_start=0, target_len=1)
-    #ensemble['enemy'] = SimpleNamespace(hidden=[512, 512, 512, 512], epochs=4000, target_start=1, target_len=1)
-    #ensemble['ball'] = SimpleNamespace(hidden=[512, 512, 512, 512], epochs=4000, target_start=2, target_len=2)
+    #ensemble['all'] = SimpleNamespace(hidden=[512, 512, 512, 512], epochs=2000, target_start=0, target_len=4)
+    #ensemble['player'] = SimpleNamespace(hidden=[512, 512, 512, 512], epochs=1000, target_start=0, target_len=1)
+    #ensemble['enemy'] = SimpleNamespace(hidden=[512, 512, 512, 512], epochs=2000, target_start=1, target_len=1)
+    ensemble['ball'] = SimpleNamespace(hidden=[512, 512, 512, 512], epochs=10000, target_start=2, target_len=2)
 
     # train_reward(buff, test_buff, epochs=10, test_freq=3)
     # train_done(buff, test_buff, epochs=10, test_freq=3)
 
+    training = 'stdev'
     demo = False
     #load_dir = './wandb/dryrun-20200314_234615-0sxdtkko'
     load_dir = 'wandb/dryrun-20200315_183131-8ua370tg'
+
 
     if demo:
 
@@ -564,7 +597,7 @@ def main():
 
         with torch.no_grad():
             for label, args in ensemble.items():
-                model = Model(state_dims, action_dims, reward_dims, args.hidden, output_dims=args.target_len * 2).to(device)
+                model = Causal(state_dims, action_dims, reward_dims, args.hidden, output_dims=args.target_len * 2).to(device)
                 state_dict = Pbar.best_state_dict(load_dir, label)
                 model.load_state_dict(state_dict)
                 predictor[label] = model
@@ -586,10 +619,22 @@ def main():
     else:
 
         for label, args in ensemble.items():
-            predictor = Model(state_dims, action_dims, reward_dims, args.hidden, output_dims=args.target_len * 2).to(device)
-            train_predictor(predictor=predictor, train_buff=train_buff, test_buff=test_buff, epochs=args.epochs,
-                            target_start=args.target_start,
-                            target_len=args.target_len, label=label, batch_size=wandb.config.predictor_batchsize,
+            mu_predictor = models.causal.Causal(state_dims, action_dims, reward_dims, args.hidden, output_dims=args.target_len).to(device)
+            if training == 'stdev':
+                state_dict = Pbar.best_state_dict('wandb/dryrun-20200317_021617-hm3ki388', 'ball')
+                mu_predictor.load_state_dict(state_dict)
+            models.causal.init(mu_predictor, torch.nn.init.kaiming_normal)
+            if training == 'mu':
+                stdev_predictor = StaticStdev(state_dims, action_dims, reward_dims, args.hidden,
+                                                output_dims=args.target_len, stdev=0.05).to(device)
+            else:
+                stdev_predictor = models.causal.Causal(state_dims, action_dims, reward_dims, args.hidden,
+                                                output_dims=args.target_len).to(device)
+            models.causal.init(stdev_predictor, torch.nn.init.kaiming_normal)
+            train_predictor(mu_predictor=mu_predictor, stdev_predictor=stdev_predictor, training=training,
+                            train_buff=train_buff, test_buff=test_buff, epochs=args.epochs,
+                            target_start=args.target_start, target_len=args.target_len,
+                            label=label, batch_size=wandb.config.predictor_batchsize,
                             test_freq=wandb.config.test_freq)
 
 
@@ -606,7 +651,8 @@ if __name__ == '__main__':
                     rew_batchsize=32,
                     done_prefix_len=4,
                     done_batchsize=32,
-                    test_freq=30)
+                    test_freq=30,
+                    display_cooldown=60)
 
     dev = dict(mode='dev',
                frame_op_len=8,
@@ -618,7 +664,8 @@ if __name__ == '__main__':
                rew_batchsize=256,
                done_prefix_len=4,
                done_batchsize=256,
-               test_freq=300)
+               test_freq=300,
+               display_cooldown=30)
 
     wandb.init(config=defaults)
 

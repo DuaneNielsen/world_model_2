@@ -12,6 +12,7 @@ import numpy as np
 import torch
 from torch.utils.data import Subset
 from tqdm import tqdm
+from collections import Iterable
 
 
 class TensorNamespace(SimpleNamespace):
