@@ -1,6 +1,6 @@
-from train_model import SARDataset, multivariate_diag_gaussian
+from train_model import SARDataset
 from train_model import gather_data, pad_collate, chomp
-from utils import gaussian_like_function, debug_image
+from utils import gaussian_like_function, debug_image, multivariate_gaussian, multivariate_diag_gaussian
 import gym
 from env import wrappers
 from atariari.benchmark.wrapper import AtariARIWrapper
@@ -124,7 +124,7 @@ def gaussian2dw(mu, sigma, size):
     return constant * exponent
 
 
-def test_multivariate_gaussian():
+def test_multivariate_diag_gaussian():
     mu = torch.tensor([[0.5, 0.5]])
     stdev = torch.tensor([[0.1, 0.3]])
 
@@ -134,6 +134,15 @@ def test_multivariate_gaussian():
     debug_image(image, block=True)
 
 
+def test_multivariate_gaussian():
+
+    mu = torch.tensor([[0.5, 0.5]])
+    covar = torch.tensor([[0.1, 0.0] , [0.0, 0.1]])
+
+    image = multivariate_gaussian(mu, covar, (40, 20))
+    image = image.numpy()
+    image = (image / image.max() * 255).astype(np.uint)
+    debug_image(image, block=True)
 
     # trajectory = buffer.trajectories[0]
     #

@@ -1,4 +1,3 @@
-from math import pi
 import random
 from time import sleep
 from types import SimpleNamespace
@@ -13,7 +12,7 @@ import wm2.env.wrappers as wrappers
 from keypoints.utils import UniImageViewer
 import torch
 
-from utils import TensorNamespace, Pbar, SARI, one_hot, gaussian_like_function, debug_image
+from utils import TensorNamespace, Pbar, SARI, one_hot, debug_image, multivariate_diag_gaussian, multivariate_gaussian
 from wm2.models.causal import Causal
 from torch.optim import Adam
 import torch.nn as nn
@@ -24,12 +23,9 @@ import wandb
 from tqdm import tqdm
 from collections import deque
 from torch.distributions import Categorical
-from torch.distributions import Normal, LogNormal
-from torch.nn.utils import clip_grad_norm_
+from torch.distributions import Normal
 import utils
 import models.causal
-import torch.nn.functional as F
-from matplotlib import pyplot as plt
 
 viewer = UniImageViewer()
 
@@ -191,33 +187,6 @@ class PrePro():
             self.history.append(state)
 
         return torch.from_numpy(np.concatenate(list(self.history)))
-
-
-def multivariate_diag_gaussian(mu, stdev, size):
-    """
-
-    :param mu: mean (N, D)
-    :param stdev: std-deviation (not variance!) (N, D)
-    :param size: tuple of output dimension sizes eg: (h, w)
-    :return: a heightmap
-    """
-    N = mu.size(0)
-    D = mu.size(1)
-    axes = [torch.linspace(0, 1.0, size[i], dtype=mu.dtype, device=mu.device) for i in range(D)]
-    grid = torch.meshgrid(axes)
-    grid = torch.stack(grid)
-    gridshape = grid.shape[1:]
-    grid = grid.flatten(start_dim=1)
-    eps = torch.finfo(mu.dtype).eps
-    stdev[stdev < eps] = stdev[stdev < eps] + eps
-
-    constant = torch.tensor((2 * pi) ** D).sqrt() * torch.prod(stdev, dim=1)
-    numerator = (grid.view(1, D, -1) - mu.view(N, D, 1)) ** 2
-    denominator = 2 * stdev ** 2
-    exponent = - torch.sum(numerator / denominator.view(N, D, 1), dim=1)
-    exponent = torch.exp(exponent)
-    height = exponent / constant
-    return height.reshape(N, *gridshape)
 
 
 def sample_action(state, policy, prepro, env, eps):
@@ -429,10 +398,11 @@ def load_or_generate(env, n, path=None):
             pickle.dump(buff, f)
     return buff
 
-def display_predictions(trajectory_mu, trajectory_stdev, label, max_length=160):
+
+def display_predictions(trajectory_mu, trajectory_stdev=None, trajectory_covar=None, label=None, max_length=12*5, fps=12):
     length = min(trajectory_mu.size(0), max_length)
-    for mu, stdev in zip(trajectory_mu[0:length], trajectory_stdev[0:length]):
-        image_size = (240 * 4, 160 * 4)
+    for mu, covar in zip(trajectory_mu[0:length], trajectory_covar[0:length]):
+        image_size = (240 * 1, 160 * 1)
 
         def strip_index(center, thickness, length):
             center = floor(center * length)
@@ -440,10 +410,16 @@ def display_predictions(trajectory_mu, trajectory_stdev, label, max_length=160):
             lower, upper = center - thickness, center + thickness
             return lower, upper
 
-        def put_strip(mu, stdev, center, thickness, image_size, dim):
+        def put_strip(image_size, center, thickness, dim, mu, stdev=None, covar=None):
             image = np.zeros(image_size)
             #stdev = torch.tensor([[0.05]], device=device)
-            strip = multivariate_diag_gaussian(mu.view(1, -1), stdev.view(1, -1), image_size)
+            if stdev is not None:
+                strip = multivariate_diag_gaussian(mu.view(1, -1), stdev.view(1, -1), image_size)
+            elif covar is not None:
+                strip = multivariate_gaussian(mu.view(1, -1), covar, image_size)
+            else:
+                raise Exception('required either a stdev or covariance matrix')
+
             strip = strip.cpu().numpy()
             lower, upper = strip_index(center, thickness, image_size[dim])
             if dim == 1:
@@ -453,93 +429,97 @@ def display_predictions(trajectory_mu, trajectory_stdev, label, max_length=160):
             image = ((image / np.max(image)) * 255).astype(np.uint)
             return image
 
-        def put_gaussian(mu, stdev, image_size):
+        def put_gaussian(image_size, mu, stdev=None, covar=None):
             #stdev = torch.tensor([[0.05, 0.05]], device=device)
-            point = multivariate_diag_gaussian(mu.view(1, -1), stdev.view(1, -1), image_size)
+            if stdev is not None:
+                point = multivariate_diag_gaussian(mu.view(1, -1), stdev.view(1, -1), image_size)
+            elif covar is not None:
+                point = multivariate_gaussian(mu.view(1, -1), covar, image_size)
+            else:
+                raise Exception('required either a stdev or covariance matrix')
             image = point.cpu().numpy()
             image = ((image / np.max(image)) * 255).astype(np.uint)
             return image
 
         if label == 'all':
-            player = put_strip(mu[0], stdev[0], 0.9, 0.05, image_size, dim=1)
-            enemy = put_strip(mu[1], stdev[1], 0.3, 0.05, image_size, dim=1)
-            ball = put_gaussian(mu[2:4], stdev[2:4], image_size)
+            player = put_strip(image_size, 0.9, 0.05, dim=1, mu=mu[0], covar=covar[0])
+            enemy = put_strip(image_size, 0.3, 0.05, dim=1, mu=mu[1], stdev=covar[1])
+            ball = put_gaussian(image_size, mu[2:4], covar[2:4])
             image = np.stack((player, enemy, ball.squeeze()))
 
         elif label == 'player':
-            image = put_strip(mu, stdev, 0.9, 0.05, image_size, dim=1)
+            image = put_strip(image_size, 0.9, 0.05, dim=1, mu=mu, covar=covar)
 
         elif label == 'enemy':
-            image = put_strip(mu, stdev, 0.3, 0.05, image_size, dim=1)
+            image = put_strip(image_size, 0.9, 0.05, dim=1, mu=mu, covar=covar)
 
         elif label == 'ball':
-            image = put_gaussian(mu, stdev, image_size)
+            image = put_gaussian(image_size, mu, covar=covar)
         else:
             raise Exception(f'label {label} not found')
 
         debug_image(image, block=False)
+        sleep(1/fps)
 
 
-def train_predictor(mu_predictor, stdev_predictor, training, train_buff, test_buff, epochs, target_start, target_len, label, batch_size,
-                    test_freq=50):
+def train_predictor(mu_predictor, train_buff, test_buff, epochs, target_start, target_len, label, batch_size, test_freq=50):
     train, test = SARDataset(train_buff), SARDataset(test_buff)
     pbar = Pbar(epochs=epochs, train_len=len(train), batch_size=batch_size, label=label)
     train = DataLoader(train, batch_size=batch_size, collate_fn=pad_collate, shuffle=True)
     test = DataLoader(test, batch_size=wandb.config.test_len, collate_fn=pad_collate, shuffle=True)
 
-    if training == 'mu':
-        optim = Adam(mu_predictor.parameters(), lr=1e-4)
-    elif training == 'stdev':
-        optim = Adam(mu_predictor.parameters(), lr=1e-4)
-    else:
-        optim = None
+    optim = Adam(mu_predictor.parameters(), lr=1e-4)
 
     eps = torch.finfo(next(iter(mu_predictor.parameters()))[0].data.dtype).eps
     train_cooldown = utils.Cooldown(secs=wandb.config.display_cooldown)
 
-    def criterion(mu, stdev, target):
+    def gaussian_criterion(mu, stdev, target):
         dist = Normal(mu, stdev + eps)
         probs = dist.log_prob(target)
         return -torch.mean(probs * seqs.mask), dist
 
-    def empirical_risk_criterion(estimate, target):
-        return (((seqs.target - estimate) * seqs.mask) ** 2).mean()
+    def criterion(estimate, target, mask):
+        return (((target - estimate) * mask) ** 2).mean()
 
     for epoch in range(epochs):
 
         for mb in train:
             seqs = autoregress(mb.state, mb.action, mb.reward, mb.mask, target_start, target_len).to(device)
             optim.zero_grad()
-            with torch.no_grad():
-                mu = mu_predictor(seqs.source, seqs.action)
-            stdev = stdev_predictor(seqs.source, seqs.action)
-            stdev = F.relu6(stdev)
-            loss, dist = criterion(mu, stdev, seqs.target)
+            mu = mu_predictor(seqs.source, seqs.action)
+            loss = criterion(mu, seqs.target, seqs.mask)
             loss.backward()
 
             optim.step()
-            wandb.log({f'train_{label}_entropy': dist.entropy().mean(),
-                       f'train_{label}_stdev': stdev.mean()})
-            if training == 'mu':
-                pbar.update_train_loss_and_checkpoint(loss, model=mu_predictor, epoch=epoch, optimizer=optim)
-            else:
-                pbar.update_train_loss_and_checkpoint(loss, model=stdev_predictor, epoch=epoch, optimizer=optim)
+            # wandb.log({f'train_{label}_entropy': dist.entropy().mean(),
+            #            f'train_{label}_stdev': stdev.mean()})
+
+            pbar.update_train_loss_and_checkpoint(loss, model=mu_predictor, epoch=epoch, optimizer=optim)
 
         if train_cooldown():
             with torch.no_grad():
                 for mb in test:
                     seqs = autoregress(mb.state, mb.action, mb.reward, mb.mask, target_start, target_len).to(device)
-                    mu = mu_predictor(seqs.source, seqs.action)
-                    stdev = stdev_predictor(seqs.source, seqs.action)
-                    stdev = F.relu6(stdev)
-                    loss, dist = criterion(mu, stdev, seqs.target)
+                    samples = []
+                    for _ in range(10):
+                        samples += [mu_predictor(seqs.source, seqs.action)]
+                    samples = torch.stack(samples)
+                    mu = samples.mean(dim=0)
 
-                    wandb.log({f'test_{label}_entropy': dist.entropy().mean()})
-                    if training == 'mu':
-                        pbar.update_test_loss_and_save_model(loss, model=mu_predictor)
-                    else:
-                        pbar.update_test_loss_and_save_model(loss, model=stdev_predictor)
-                    display_predictions(mu[0], stdev[0], label)
+                    covar = samples - mu.view(1, *mu.shape)
+                    s, n, t, d = samples.shape
+                    covar = covar.reshape(s, n*t, d)
+                    covar = covar.permute(1, 2, 0).matmul(covar.permute(1, 0, 2)) / (s - 1)
+                    covar = covar.reshape(n, t, d, d)
+
+                    stdev = samples.std(dim=0)
+
+
+                    loss = criterion(mu, seqs.target, seqs.mask)
+
+                    #wandb.log({f'test_{label}_entropy': dist.entropy().mean()})
+                    pbar.update_test_loss_and_save_model(loss, model=mu_predictor)
+                    display_predictions(mu[0], trajectory_covar=covar[0], label=label)
 
 
 class StaticStdev(nn.Module):
@@ -578,7 +558,7 @@ def main():
     #ensemble['all'] = SimpleNamespace(hidden=[512, 512, 512, 512], epochs=2000, target_start=0, target_len=4)
     #ensemble['player'] = SimpleNamespace(hidden=[512, 512, 512, 512], epochs=1000, target_start=0, target_len=1)
     #ensemble['enemy'] = SimpleNamespace(hidden=[512, 512, 512, 512], epochs=2000, target_start=1, target_len=1)
-    ensemble['ball'] = SimpleNamespace(hidden=[512, 512, 512, 512], epochs=10000, target_start=2, target_len=2)
+    ensemble['ball'] = SimpleNamespace(hidden=[512, 512, 512, 512], epochs=5000, target_start=2, target_len=2)
 
     # train_reward(buff, test_buff, epochs=10, test_freq=3)
     # train_done(buff, test_buff, epochs=10, test_freq=3)
@@ -620,18 +600,11 @@ def main():
 
         for label, args in ensemble.items():
             mu_predictor = models.causal.Causal(state_dims, action_dims, reward_dims, args.hidden, output_dims=args.target_len).to(device)
-            if training == 'stdev':
-                state_dict = Pbar.best_state_dict('wandb/dryrun-20200317_021617-hm3ki388', 'ball')
-                mu_predictor.load_state_dict(state_dict)
             models.causal.init(mu_predictor, torch.nn.init.kaiming_normal)
-            if training == 'mu':
-                stdev_predictor = StaticStdev(state_dims, action_dims, reward_dims, args.hidden,
-                                                output_dims=args.target_len, stdev=0.05).to(device)
-            else:
-                stdev_predictor = models.causal.Causal(state_dims, action_dims, reward_dims, args.hidden,
-                                                output_dims=args.target_len).to(device)
-            models.causal.init(stdev_predictor, torch.nn.init.kaiming_normal)
-            train_predictor(mu_predictor=mu_predictor, stdev_predictor=stdev_predictor, training=training,
+            mu_predictor = models.causal.Causal(state_dims, action_dims, reward_dims, args.hidden,
+                                            output_dims=args.target_len).to(device)
+            models.causal.init(mu_predictor, torch.nn.init.kaiming_normal)
+            train_predictor(mu_predictor=mu_predictor,
                             train_buff=train_buff, test_buff=test_buff, epochs=args.epochs,
                             target_start=args.target_start, target_len=args.target_len,
                             label=label, batch_size=wandb.config.predictor_batchsize,
@@ -652,7 +625,8 @@ if __name__ == '__main__':
                     done_prefix_len=4,
                     done_batchsize=32,
                     test_freq=30,
-                    display_cooldown=60)
+                    display_cooldown=60,
+                    device='cuda:0')
 
     dev = dict(mode='dev',
                frame_op_len=8,
@@ -665,15 +639,16 @@ if __name__ == '__main__':
                done_prefix_len=4,
                done_batchsize=256,
                test_freq=300,
-               display_cooldown=30)
+               display_cooldown=30,
+               device='cuda:1')
 
-    wandb.init(config=defaults)
+    wandb.init(config=dev)
 
     # config validations
     config = wandb.config
     assert config.predictor_batchsize <= config.train_len
     assert config.test_len >= 2
 
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    device = wandb.config.device
 
     main()

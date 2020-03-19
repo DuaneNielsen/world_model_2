@@ -4,7 +4,7 @@ from types import SimpleNamespace
 from pathlib import Path
 import sys
 from datetime import datetime
-from math import floor
+from math import floor, pi
 
 import wandb
 import cv2
@@ -181,3 +181,60 @@ def debug_image(im, block=True):
         cv2.waitKey(0)
     else:
         cv2.waitKey(10)
+
+
+def multivariate_gaussian(mu, covar, size):
+    """
+
+    :param mu: mean (N, D)
+    :param covar: std-deviation (not variance!) (N, D, D)
+    :param size: tuple of output dimension sizes eg: (h, w)
+    :return: a heightmap
+    """
+    N = mu.size(0)
+    D = mu.size(1)
+    axes = [torch.linspace(0, 1.0, size[i], dtype=mu.dtype, device=mu.device) for i in range(D)]
+    grid = torch.meshgrid(axes)
+    grid = torch.stack(grid)
+    gridshape = grid.shape[1:]
+    grid = grid.flatten(start_dim=1)
+    eps = torch.finfo(mu.dtype).eps
+
+    constant = torch.tensor((2 * pi) ** D).sqrt() * torch.det(covar)
+    mean_diff = (grid.view(1, D, -1) - mu.view(N, D, 1))
+    covar = torch.cholesky(covar + eps)
+    inv_covar = torch.cholesky_inverse(covar)
+    exponent = torch.einsum('bij, jk, bki -> bi', mean_diff.permute(0, 2, 1), inv_covar, mean_diff) * - 0.5
+    #exponent2 = mean_diff.permute(0, 2, 1).matmul(inv_covar).matmul(mean_diff) * - 0.5
+    #exponent2 = exponent2.diagonal(dim1=1, dim2=2)
+
+    exponent = torch.exp(exponent)
+    height = exponent / constant
+    return height.reshape(N, *gridshape)
+
+
+def multivariate_diag_gaussian(mu, stdev, size):
+    """
+
+    :param mu: mean (N, D)
+    :param stdev: std-deviation (not variance!) (N, D)
+    :param size: tuple of output dimension sizes eg: (h, w)
+    :return: a heightmap
+    """
+    N = mu.size(0)
+    D = mu.size(1)
+    axes = [torch.linspace(0, 1.0, size[i], dtype=mu.dtype, device=mu.device) for i in range(D)]
+    grid = torch.meshgrid(axes)
+    grid = torch.stack(grid)
+    gridshape = grid.shape[1:]
+    grid = grid.flatten(start_dim=1)
+    eps = torch.finfo(mu.dtype).eps
+    stdev[stdev < eps] = stdev[stdev < eps] + eps
+
+    constant = torch.tensor((2 * pi) ** D).sqrt() * torch.prod(stdev, dim=1)
+    numerator = (grid.view(1, D, -1) - mu.view(N, D, 1)) ** 2
+    denominator = 2 * stdev ** 2
+    exponent = - torch.sum(numerator / denominator.view(N, D, 1), dim=1)
+    exponent = torch.exp(exponent)
+    height = exponent / constant
+    return height.reshape(N, *gridshape)
