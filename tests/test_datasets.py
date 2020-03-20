@@ -47,9 +47,11 @@ def test_pad_collateSAR(buffer):
         mask_rolled = torch.cat((torch.ones_like(mask[:, 0, :].unsqueeze(1)), mask[:, :-1, :]), dim=1)
         assert torch.allclose(torch.sum(source * mask_rolled), torch.sum(source))
 
+
 def test_rect():
     rect = rectangle.create()
     debug_image(rect, block=True)
+
 
 def test_gaussian():
     pos = []
@@ -106,6 +108,7 @@ def gaussian2Dd(mu, sigma, size):
     # gm = -torch.sqrt(torch.cumprod())
 
     # return gm
+
 
 def gaussian2dw(mu, sigma, size):
     D = mu.size(0)
