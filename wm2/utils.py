@@ -238,3 +238,21 @@ def multivariate_diag_gaussian(mu, stdev, size):
     exponent = torch.exp(exponent)
     height = exponent / constant
     return height.reshape(N, *gridshape)
+
+
+def chomp(seq, end, dim, bite_size):
+    """
+    Shortens a dimension by removing the head or tail
+    :param seq: the input sequence as tensor
+    :param end: chomp the head (index 0) or the tail (index last)
+    :param dim: the time dimension to chomp along
+    :param bite_size: the number of elements to chomp
+    :return:
+    """
+    chomped_len = seq.size(dim) - bite_size
+    if end == 'head':
+        return torch.narrow(seq, dim, bite_size, chomped_len)
+    if end == 'tail':
+        return torch.narrow(seq, dim, 0, chomped_len)
+    else:
+        Exception('end parameter must be head or tail')

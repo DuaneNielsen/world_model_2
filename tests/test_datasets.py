@@ -1,6 +1,6 @@
 from train_model import SARDataset
-from train_model import gather_data, pad_collate, chomp
-from utils import gaussian_like_function, debug_image, multivariate_gaussian, multivariate_diag_gaussian
+from train_model import gather_data, pad_collate
+from utils import gaussian_like_function, debug_image, multivariate_gaussian, multivariate_diag_gaussian, chomp
 import gym
 from env import wrappers
 from atariari.benchmark.wrapper import AtariARIWrapper

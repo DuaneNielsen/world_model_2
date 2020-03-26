@@ -12,7 +12,8 @@ import wm2.env.wrappers as wrappers
 from keypoints.utils import UniImageViewer
 import torch
 
-from utils import TensorNamespace, Pbar, SARI, one_hot, debug_image, multivariate_diag_gaussian, multivariate_gaussian
+from utils import TensorNamespace, Pbar, SARI, one_hot, debug_image, multivariate_diag_gaussian, multivariate_gaussian, \
+    chomp
 from wm2.models.causal import Causal
 from torch.optim import Adam
 import torch.nn as nn
@@ -301,16 +302,6 @@ def train_done(buff, test_buff, epochs, test_freq):
     pbar.close()
 
 
-def chomp(seq, end, dim, bite_size):
-    chomped_len = seq.size(dim) - bite_size
-    if end == 'left':
-        return torch.narrow(seq, dim, bite_size, chomped_len)
-    if end == 'right':
-        return torch.narrow(seq, dim, 0, chomped_len)
-    else:
-        Exception('end parameter must be left or right')
-
-
 def pad(batch, longest):
     params = {}
     for trajectory in batch:
@@ -374,10 +365,10 @@ def autoregress(state, action, reward, mask, target_start=0, target_length=None,
         target = target.narrow(dim=2, start=target_start, length=target_length)
 
     ret = {}
-    ret['source'] = chomp(source, 'right', dim=1, bite_size=advance)
-    ret['action'] = chomp(action, 'right', dim=1, bite_size=advance)
-    ret['target'] = chomp(target, 'left', dim=1, bite_size=advance)
-    ret['mask'] = chomp(mask, 'left', dim=1, bite_size=advance)
+    ret['source'] = chomp(source, 'tail', dim=1, bite_size=advance)
+    ret['action'] = chomp(action, 'tail', dim=1, bite_size=advance)
+    ret['target'] = chomp(target, 'head', dim=1, bite_size=advance)
+    ret['mask'] = chomp(mask, 'head', dim=1, bite_size=advance)
     return TensorNamespace(**ret)
 
     pbar.close()
@@ -475,16 +466,16 @@ def compute_covar(samples, mu):
     return covar
 
 
-def train_predictor(mu_predictor, train_buff, test_buff, epochs, target_start, target_len, label, batch_size,
+def train_predictor(mu_encoder, mu_decoder, train_buff, test_buff, epochs, target_start, target_len, label, batch_size,
                     test_freq=50):
     train, test = SARDataset(train_buff), SARDataset(test_buff)
     pbar = Pbar(epochs=epochs, train_len=len(train), batch_size=batch_size, label=label)
     train = DataLoader(train, batch_size=batch_size, collate_fn=pad_collate, shuffle=True)
     test = DataLoader(test, batch_size=wandb.config.test_len, collate_fn=pad_collate, shuffle=True)
 
-    optim = Adam(mu_predictor.parameters(), lr=1e-4)
+    optim = Adam(mu_encoder.parameters(), lr=1e-4)
 
-    eps = torch.finfo(next(iter(mu_predictor.parameters()))[0].data.dtype).eps
+    eps = torch.finfo(next(iter(mu_encoder.parameters()))[0].data.dtype).eps
     train_cooldown = utils.Cooldown(secs=wandb.config.display_cooldown)
 
     def gaussian_criterion(mu, stdev, target):
@@ -500,33 +491,54 @@ def train_predictor(mu_predictor, train_buff, test_buff, epochs, target_start, t
         for mb in train:
             seqs = autoregress(mb.state, mb.action, mb.reward, mb.mask, target_start, target_len).to(device)
             optim.zero_grad()
-            mu = mu_predictor(seqs.source, seqs.action)
-            loss = criterion(mu, seqs.target, seqs.mask)
-            loss.backward()
+            inp = torch.cat((seqs.source, seqs.action), dim=2)
+            z = mu_encoder(inp)
+            out_seq = []
+            for i, h in zip(inp, z):
+                h, c = h.unsqueeze(0).contiguous(), h.clone().unsqueeze(0).contiguous()
+                mu, (h, c) = mu_decoder(i.unsqueeze(0), (h, c))
+                out_seq += [mu]
 
+            out_seq = torch.cat(out_seq)
+            loss = criterion(out_seq, seqs.target, seqs.mask)
+            loss.backward()
             optim.step()
+
             # wandb.log({f'train_{label}_entropy': dist.entropy().mean(),
             #            f'train_{label}_stdev': stdev.mean()})
 
-            pbar.update_train_loss_and_checkpoint(loss, model=mu_predictor, epoch=epoch, optimizer=optim)
+            pbar.update_train_loss_and_checkpoint(loss, model=mu_encoder, epoch=epoch, optimizer=optim)
 
         if train_cooldown():
             with torch.no_grad():
                 for mb in test:
                     seqs = autoregress(mb.state, mb.action, mb.reward, mb.mask, target_start, target_len).to(device)
-                    samples = []
+                    inp = torch.cat((seqs.source, seqs.action), dim=2)
+                    hidden_encodings = []
                     for _ in range(10):
-                        samples += [mu_predictor(seqs.source, seqs.action)]
-                    samples = torch.stack(samples)
-                    mu = samples.mean(dim=0)
+                        hidden_encodings += [mu_encoder(inp)]
+                    episodes = []
+                    for e in range(len(inp)):
+                        samples = []
+                        for j in range(len(hidden_encodings)):
+                            i = inp[e]
+                            h = hidden_encodings[j][e]
+                            h, c = h.unsqueeze(0).contiguous(), h.clone().unsqueeze(0).contiguous()
+                            mu, (h, c) = mu_decoder(i.unsqueeze(0), (h, c))
+                            samples += [mu]
+                        episodes.append(torch.stack(samples))
 
-                    stdev = samples.std(dim=0)
+                    episodes = torch.cat(episodes, dim=1)
+                    mu = episodes.mean(dim=0)
+                    covar = compute_covar(episodes, mu)
+
+                    stdev = episodes.std(dim=0)
 
                     loss = criterion(mu, seqs.target, seqs.mask)
 
                     # wandb.log({f'test_{label}_entropy': dist.entropy().mean()})
-                    pbar.update_test_loss_and_save_model(loss, model=mu_predictor)
-                    display_predictions(mu[0], trajectory_covar=compute_covar[0], label=label)
+                    pbar.update_test_loss_and_save_model(loss, model=mu_encoder)
+                    display_predictions(mu[0], trajectory_covar=covar[0], label=label)
 
 
 class StaticStdev(nn.Module):
@@ -538,6 +550,12 @@ class StaticStdev(nn.Module):
     def forward(self, state, actions):
         return torch.full((state.size(0), state.size(1), self.output_dims),
                           fill_value=self.stdev, requires_grad=False, dtype=state.dtype, device=state.device)
+
+
+def simple_sample(n, mean, c):
+    z = torch.randn(*mean.shape, n, device=mean.device, dtype=mean.dtype)
+    s = mean.view(*mean.shape, 1) + c.matmul(z)
+    return s.permute(0, 1, 3, 2)
 
 
 def main():
@@ -562,17 +580,18 @@ def main():
 
     ensemble = {}
     # ensemble['all'] = SimpleNamespace(hidden=[512, 512, 512, 512], epochs=2000, target_start=0, target_len=4)
-    ensemble['player'] = SimpleNamespace(hidden=[512, 512, 512, 512, 1], epochs=1000, target_start=0, target_len=1,
+    ensemble['player'] = SimpleNamespace(hidden=[512, 512, 512], hidden_state_dims=512, epochs=1000, target_start=0,
+                                         target_len=1,
                                          x=0.9, thickness=0.05, dim=1)
-    ensemble['enemy'] = SimpleNamespace(hidden=[512, 512, 512, 512, 1], epochs=2000, target_start=1, target_len=1,
-                                        x=0.3, thickness=0.05, dim=1)
-    ensemble['ball'] = SimpleNamespace(hidden=[512, 512, 512, 512, 2], epochs=5000, target_start=2, target_len=2)
+    # ensemble['enemy'] = SimpleNamespace(hidden=[512, 512, 512, 512, 1], epochs=2000, target_start=1, target_len=1,
+    #                                    x=0.3, thickness=0.05, dim=1)
+    # ensemble['ball'] = SimpleNamespace(hidden=[512, 512, 512, 512, 2], epochs=5000, target_start=2, target_len=2)
 
-    # train_reward(buff, test_buff, epochs=10, test_freq=3)
+    # train_reward(train_buff, test_buff, epochs=10, test_freq=3)
     # train_done(buff, test_buff, epochs=10, test_freq=3)
 
     training = 'stdev'
-    demo = True
+    demo = False
     # load_dir = './wandb/dryrun-20200314_234615-0sxdtkko'
     load_dir = 'wandb/run-20200319_020617-xbjdabd8'
 
@@ -589,6 +608,8 @@ def main():
                 self._load(config, load_dir)
                 self.mu = {k: [] for k in ensemble}
                 self.covar = {k: [] for k in ensemble}
+                self.mu_2 = {k: [] for k in ensemble}
+                self.covar_2 = {k: [] for k in ensemble}
                 self.seqs = None
 
             def _load(self, config, load_dir):
@@ -604,15 +625,20 @@ def main():
                     self.seqs = autoregress(trajectories.state, trajectories.action, trajectories.reward,
                                             trajectories.mask).to(device)
                     samples = {k: [] for k in ensemble}
+                    seq = torch.empty_like(self.seqs.source)
 
-                    for k, v in ensemble.items():
+                    for k, args in self.config.items():
                         for _ in range(32):
                             estimate = self.ensemble[k](self.seqs.source, self.seqs.action)
                             samples[k] += [estimate]
 
+                        seq[:, :, args.target_start:args.target_start + args.target_len] = samples[k]
                         samples[k] = torch.stack(samples[k])
                         self.mu[k] = samples[k].mean(dim=0)
                         self.covar[k] = compute_covar(samples[k], self.mu[k])
+
+                    # for k, v in ensemble.items():
+                    #     samples[k] = simple_sample(1, self.mu[k], self.covar[k])
 
             def play(self, trajectory_id, max_length=100, fps=12, image_size=(240 * 4, 160 * 4)):
                 mask_len = self.seqs.mask[trajectory_id].sum()
@@ -677,10 +703,12 @@ def main():
     else:
 
         for label, args in ensemble.items():
-            mu_predictor = models.causal.Causal(state_dims, action_dims, reward_dims, args.hidden,
-                                                output_dims=args.target_len).to(device)
-            models.causal.init(mu_predictor, torch.nn.init.kaiming_normal)
-            train_predictor(mu_predictor=mu_predictor,
+            mu_encoder = models.causal.Encoder(state_dims, action_dims, reward_dims, args.hidden,
+                                               output_dims=args.hidden_state_dims).to(device)
+            mu_decoder = models.causal.Decoder(state_dims, action_dims, reward_dims, args.hidden_state_dims,
+                                               args.target_len).to(device)
+            models.causal.init(mu_encoder, torch.nn.init.kaiming_normal)
+            train_predictor(mu_encoder=mu_encoder, mu_decoder=mu_decoder,
                             train_buff=train_buff, test_buff=test_buff, epochs=args.epochs,
                             target_start=args.target_start, target_len=args.target_len,
                             label=label, batch_size=wandb.config.predictor_batchsize,

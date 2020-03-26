@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 from torch.nn.utils import weight_norm
 import torch.nn.init
+from wm2.utils import chomp
 
 
 class Chomp1d(nn.Module):
@@ -106,6 +107,58 @@ class Causal(nn.Module):
         inp = inp.permute(0, 2, 1)
         out = self.tcn(inp)
         return out.permute(0, 2, 1)
+
+
+class Encoder(nn.Module):
+    def __init__(self, state_dims, action_dims, reward_dims, hidden_layers, output_dims):
+        super().__init__()
+        self.state_dims = state_dims
+        self.action_dims = action_dims
+        self.reward_dims = reward_dims
+        self.hidden_layers = hidden_layers
+        self.output_dims = output_dims
+        input_channels = self.state_dims + self.action_dims + self.reward_dims
+        hidden_layers += [output_dims]
+        self.tcn = TemporalConvNet(input_channels, hidden_layers)
+
+    def forward(self, inp):
+        #inp = torch.cat((state, action), dim=2)
+        inp = inp.permute(0, 2, 1)
+        z = self.tcn(inp)
+        return z.permute(0, 2, 1)
+
+        # for each trajectory
+        output_seq = []
+
+        for i, h in zip(inp, z):
+            (h, c) = h.permute(1, 0).unsqueeze(0).contiguous(), h.clone().permute(1, 0).unsqueeze(0).contiguous()
+            i = i.permute(1, 0).unsqueeze(0)
+            o, (h, c) = self.lstm(i, (h, c))
+            s = self.output_block(o)
+            output_seq += [s]
+
+            i_plus_1 = chomp(i.clone(), 'head', dim=1, bite_size=1)
+            h = chomp(h, 'tail', dim=1, bite_size=1)
+            c = chomp(c, 'tail', dim=1, bite_size=1)
+            o, (h, c) = self.lstm(i_plus_1, (h, c))
+            s = self.output_block(o)
+            output_seq += [s]
+
+        output_seq = torch.cat(output_seq)
+        return output_seq
+
+
+class Decoder(nn.Module):
+    def __init__(self, state_dims, action_dims, reward_dims, hidden_state_dims, target_len, dropout=0.8):
+        super().__init__()
+        input_channels = state_dims + action_dims + reward_dims
+        self.lstm = nn.LSTM(input_channels, hidden_state_dims, 1, dropout=dropout)
+        self.output_block = nn.Linear(hidden_state_dims, target_len)
+
+    def forward(self, i, h):
+        o, h = self.lstm(i, h)
+        s = self.output_block(o)
+        return s, h
 
 
 class TCMDN(nn.Module):
