@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 from torch.nn.utils import weight_norm
 import torch.nn.init
-from wm2.utils import chomp
+from data.utils import chomp
 
 
 class Chomp1d(nn.Module):
@@ -122,30 +122,9 @@ class Encoder(nn.Module):
         self.tcn = TemporalConvNet(input_channels, hidden_layers)
 
     def forward(self, inp):
-        #inp = torch.cat((state, action), dim=2)
         inp = inp.permute(0, 2, 1)
         z = self.tcn(inp)
         return z.permute(0, 2, 1)
-
-        # for each trajectory
-        output_seq = []
-
-        for i, h in zip(inp, z):
-            (h, c) = h.permute(1, 0).unsqueeze(0).contiguous(), h.clone().permute(1, 0).unsqueeze(0).contiguous()
-            i = i.permute(1, 0).unsqueeze(0)
-            o, (h, c) = self.lstm(i, (h, c))
-            s = self.output_block(o)
-            output_seq += [s]
-
-            i_plus_1 = chomp(i.clone(), 'head', dim=1, bite_size=1)
-            h = chomp(h, 'tail', dim=1, bite_size=1)
-            c = chomp(c, 'tail', dim=1, bite_size=1)
-            o, (h, c) = self.lstm(i_plus_1, (h, c))
-            s = self.output_block(o)
-            output_seq += [s]
-
-        output_seq = torch.cat(output_seq)
-        return output_seq
 
 
 class Decoder(nn.Module):
