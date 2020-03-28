@@ -128,10 +128,11 @@ class Encoder(nn.Module):
 
 
 class Decoder(nn.Module):
-    def __init__(self, state_dims, action_dims, reward_dims, hidden_state_dims, target_len, dropout=0.8):
+    def __init__(self, state_dims, action_dims, reward_dims, hidden_state_dims, target_len, layers=2, dropout=0.8):
         super().__init__()
         input_channels = state_dims + action_dims + reward_dims
-        self.lstm = nn.LSTM(input_channels, hidden_state_dims, 1, dropout=dropout)
+        self.layers = layers
+        self.lstm = nn.LSTM(input_channels, hidden_state_dims, layers, dropout=dropout)
         self.output_block = nn.Linear(hidden_state_dims, target_len)
 
     def forward(self, i, h):

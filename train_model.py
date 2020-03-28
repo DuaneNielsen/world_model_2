@@ -117,6 +117,17 @@ def load_or_generate(env, n, path=None):
     return buff
 
 
+def make_future_seq(inp, future_timesteps=3):
+    inp_batch = []
+    prev_inp = inp.clone()
+
+    for _ in range(future_timesteps):
+        inp_batch += [prev_inp]
+        prev_inp = chomp_and_pad(inp, dim=1)
+
+    return torch.cat(inp_batch)
+
+
 def train_predictor(mu_encoder, mu_decoder, train_buff, test_buff, epochs, target_start, target_len, label, batch_size,
                     test_freq=50):
     train, test = SARDataset(train_buff), SARDataset(test_buff)
@@ -135,25 +146,13 @@ def train_predictor(mu_encoder, mu_decoder, train_buff, test_buff, epochs, targe
             seqs = autoregress(mb.state, mb.action, mb.reward, mb.mask, target_start, target_len).to(device)
             optim.zero_grad()
             inp = torch.cat((seqs.source, seqs.action), dim=2)
-            h = mu_encoder(inp)
+            hidden = mu_encoder(inp)
 
-            h = h.contiguous()
-            c = h.clone().contiguous()
+            h = hidden.repeat(mu_decoder.layers, 1, 1).contiguous()
+            c = hidden.clone().repeat(mu_decoder.layers, 1, 1).contiguous()
 
-            inp_batch = []
-            tar_batch = []
-            prev_inp = inp.clone()
-            prev_tar = seqs.target
-
-            for _ in range(2):
-                inp_batch += [prev_inp]
-                tar_batch += [prev_tar]
-
-                prev_inp = chomp_and_pad(inp, dim=1)
-                prev_tar = chomp_and_pad(seqs.target, dim=1)
-
-            inp_future = torch.cat(inp_batch)
-            tar_future = torch.cat(tar_batch)
+            inp_future = make_future_seq(inp)
+            tar_future = make_future_seq(seqs.target)
 
             mu, (h, c) = mu_decoder(inp_future, (h, c))
 
@@ -168,29 +167,28 @@ def train_predictor(mu_encoder, mu_decoder, train_buff, test_buff, epochs, targe
                 for mb in test:
                     seqs = autoregress(mb.state, mb.action, mb.reward, mb.mask, target_start, target_len).to(device)
                     inp = torch.cat((seqs.source, seqs.action), dim=2)
-                    hidden_encodings = []
+                    hidden = mu_encoder(inp)
+
+                    inp_future = make_future_seq(inp)
+                    tar_future = make_future_seq(seqs.target)
+
+                    samples = []
                     for _ in range(10):
-                        hidden_encodings += [mu_encoder(inp)]
-                    episodes = []
-                    for e in range(len(inp)):
-                        samples = []
-                        for j in range(len(hidden_encodings)):
-                            i = inp[e]
-                            h = hidden_encodings[j][e]
-                            h, c = h.unsqueeze(0).contiguous(), h.clone().unsqueeze(0).contiguous()
-                            mu, (h, c) = mu_decoder(i.unsqueeze(0), (h, c))
-                            samples += [mu]
-                        episodes.append(torch.stack(samples))
+                        h = hidden.repeat(mu_decoder.layers, 1, 1).contiguous()
+                        c = hidden.clone().repeat(mu_decoder.layers, 1, 1).contiguous()
+                        mu, (h, c) = mu_decoder(inp_future, (h, c))
+                        samples += [mu]
 
-                    episodes = torch.cat(episodes, dim=1)
-                    mu = episodes.mean(dim=0)
+                    samples = torch.stack(samples)
 
-                    loss = ((mu - seqs.target)**2).mean()
+                    mu = samples.mean(dim=0)
 
-                    covar = compute_covar(episodes, mu)
+                    loss = ((mu - tar_future)**2).mean()
+
+                    covar = compute_covar(samples, mu)
                     # wandb.log({f'test_{label}_entropy': dist.entropy().mean()})
                     pbar.update_test_loss_and_save_model(loss, model=mu_encoder)
-                    display_predictions(mu[0], trajectory_covar=covar[0], label=label)
+                    display_predictions(mu, trajectory_covar=covar, label=label)
 
 
 class StaticStdev(nn.Module):
@@ -362,7 +360,7 @@ def main():
 
 
 if __name__ == '__main__':
-    defaults = dict(mode='test',
+    test = dict(mode='test',
                     frame_op_len=8,
                     train_len=512,
                     test_len=16,
