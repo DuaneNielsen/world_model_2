@@ -101,12 +101,12 @@ def display_predictions(trajectory_mu, trajectory_stdev=None, trajectory_covar=N
                     image = put_strip(image_size, 0.9, 0.05, dim=1, mu=mu[t], covar=covar[t])
 
                 elif label == 'ball':
-                    image = put_gaussian(image_size, mu[t], covar=covar[t])
+                    image = put_gaussian(image_size, mu[t], covar=covar[t]).squeeze()
                 else:
                     raise Exception(f'label {label} not found')
 
                 panel.append(image)
 
-            image = np.concatenate(panel, axis=2)
+            image = np.concatenate(panel, axis=1)
             debug_image(image, block=False)
             sleep(1 / fps)

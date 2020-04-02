@@ -73,7 +73,15 @@ class TemporalConvNet(nn.Module):
     https://arxiv.org/pdf/1803.01271.pdf
     https://github.com/locuslab/TCN
     """
-    def __init__(self, num_inputs, num_channels, kernel_size=2, dropout=0.2, nonlin=None):
+    def __init__(self, num_inputs, num_channels, kernel_size=2, dropout=0.2, nonlin=None, final_nonlin=None):
+        """
+        :param num_inputs: the number of time series signals to input
+        :param num_channels: the number of filters in each layer
+        :param kernel_size: the time-steps to combine at each layer
+        :param dropout: dropout frequency
+        :param nonlin: nonlinearity to apply at each layer (default ReLU)
+        :param final_nonlin: nonlinearity to apply at final layer (default ReLU)
+        """
         super(TemporalConvNet, self).__init__()
         layers = []
         num_levels = len(num_channels)
@@ -81,6 +89,8 @@ class TemporalConvNet(nn.Module):
             dilation_size = 2 ** i
             in_channels = num_inputs if i == 0 else num_channels[i-1]
             out_channels = num_channels[i]
+            if i == num_levels -1 and final_nonlin is not None:
+                nonlin = final_nonlin
             layers += [TemporalBlock(in_channels, out_channels, kernel_size, stride=1, dilation=dilation_size,
                                      padding=(kernel_size-1) * dilation_size, dropout=dropout, nonlin=nonlin)]
 
@@ -109,8 +119,33 @@ class Causal(nn.Module):
         return out.permute(0, 2, 1)
 
 
+class RewardNet(nn.Module):
+    def __init__(self, input_dim, hidden_layers, reward_dim, scale=1.0, offset=0.0):
+        super().__init__()
+        hidden_layers += [reward_dim]
+        self.tcn =TemporalConvNet(input_dim, hidden_layers, nonlin=nn.Tanh)
+        self.scale = scale
+        self.offset = offset
+
+    def forward(self, inp):
+        inp = inp.permute(0, 2, 1)
+        z = self.tcn(inp)
+        return z.permute(0, 2, 1) * self.scale
+
+
+class DoneNet(nn.Module):
+    def __init__(self, input_dim, hidden_layers):
+        super().__init__()
+        hidden_layers += [1]
+        self.tcn =TemporalConvNet(input_dim, hidden_layers, final_nonlin=nn.Sigmoid)
+
+    def forward(self, inp):
+        inp = inp.permute(0, 2, 1)
+        z = self.tcn(inp)
+        return z.permute(0, 2, 1)
+
 class Encoder(nn.Module):
-    def __init__(self, state_dims, action_dims, reward_dims, hidden_layers, output_dims):
+    def __init__(self, state_dims, action_dims, reward_dims, hidden_layers, output_dims, nonlin=None):
         super().__init__()
         self.state_dims = state_dims
         self.action_dims = action_dims
@@ -119,13 +154,16 @@ class Encoder(nn.Module):
         self.output_dims = output_dims
         input_channels = self.state_dims + self.action_dims + self.reward_dims
         hidden_layers += [output_dims]
-        self.tcn = TemporalConvNet(input_channels, hidden_layers)
+        self.tcn = TemporalConvNet(input_channels, hidden_layers, nonlin=nonlin)
 
     def forward(self, inp):
+        """
+        :param inp: tensor of shape (N, T, D) : N = Batch, T=Time, D=dimensions
+        :return:
+        """
         inp = inp.permute(0, 2, 1)
         z = self.tcn(inp)
         return z.permute(0, 2, 1)
-
 
 class Decoder(nn.Module):
     def __init__(self, state_dims, action_dims, reward_dims, hidden_state_dims, target_len, layers=2, dropout=0.8):

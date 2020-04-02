@@ -44,30 +44,34 @@ class Pbar:
         self.best_loss = sys.float_info.max
         self.checkpoint_cooldown = Cooldown(checkpoint_secs)
 
-
-    def update_train_loss_and_checkpoint(self, loss, model=None, epoch=None, optimizer=None):
+    def update_train_loss_and_checkpoint(self, loss, models=None, epoch=None, optimizer=None):
         self.test = []
         self.loss_move_ave.append(loss.item())
         self.train_loss = mean(list(self.loss_move_ave))
         self.bar.update(self.batch_size)
         wandb.log({f'{self.label}_train_loss': loss.item()})
         self.bar.set_description(f'{self.label} train_loss: {self.train_loss:.6f} test_loss: {self.test_loss:.6f}')
-        if model is not None and self.checkpoint_cooldown:
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-            }, str(Path(wandb.run.dir) / Path(f'{self.label}_checkpoint.pt')))
+        if models is not None and self.checkpoint_cooldown:
+            save = {}
+            save['epoch'] = epoch
+            save['optimizer_state_dict'] = optimizer.state_dict()
+            for name, model in models.items():
+                save[name] = model.state_dict()
+            torch.save(save, str(Path(wandb.run.dir) / Path(f'{self.label}_checkpoint.pt')))
 
-    def update_test_loss_and_save_model(self, loss, model=None):
+    def update_test_loss_and_save_model(self, loss, models=None):
         self.test.append(loss.item())
         self.test_loss = mean(list(self.test))
         wandb.log({f'{self.label}_test_loss': loss.item()})
         self.bar.set_description(f'{self.label} train_loss: {self.train_loss:.6f} test_loss: {self.test_loss:.6f}')
-        if model is not None:
+        if models is not None:
             if loss.item() < self.best_loss:
+                save = {}
                 self.best_loss = loss.item()
-                torch.save(model.state_dict(), str(Path(wandb.run.dir) / Path(f'{self.label}_best.pt')))
+                for name, model in models.items():
+                    save['loss'] = loss.item()
+                    save[name] = model.state_dict()
+                torch.save(save, str(Path(wandb.run.dir) / Path(f'{self.label}_best.pt')))
 
     def close(self):
         self.bar.close()
@@ -79,7 +83,7 @@ class Pbar:
 
     @staticmethod
     def checkpoint(wandb_run_dir, label):
-        f = str(Path(wandb_run_dir) / Path(f'{label}_best.pt'))
+        f = str(Path(wandb_run_dir) / Path(f'{label}_checkpoint.pt'))
         return torch.load(f)
 
 

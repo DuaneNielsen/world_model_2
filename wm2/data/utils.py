@@ -89,12 +89,49 @@ def autoregress(state, action, reward, mask, target_start=0, target_length=None,
     return TensorNamespace(**ret)
 
 
-def chomp_and_pad(i, dim, bite_size=1):
-    i_plus_1 = chomp(i.clone(), 'head', dim=dim, bite_size=bite_size)
+def chomp_and_pad(i, dim, bite_size=1, mode='head', pad_mode='zeros'):
+    """
+    chomps at the head or tail, and pads the opposite end
+    :param i: input tensor
+    :param dim: the dimension to chomp
+    :param bite_size: number of elements to chomp
+    :param mode: head or tail
+    :param pad_mode: fill or zero
+    :return:
+
+        Example:
+
+        >>> s = torch.tensor([1, 2, 3, 4])
+        >>> chomp_and_pad(s, 0, mode='tail', pad_mode='fill')
+        ... tensor([1, 1, 2, 3])
+        >>> chomp_and_pad(s, 0, mode='head', pad_mode='fill')
+        ... tensor([2, 3, 4, 4])
+
+
+    """
     pad_size = list(i.shape)
     pad_size[dim] = 1
-    pad = torch.zeros(*pad_size, dtype=i.dtype, device=i.device)
-    i_plus_1 = torch.cat((i_plus_1, pad), dim=dim)
+    length = i.size(dim)
+    if pad_mode == 'zeros':
+        pad = torch.zeros(*pad_size, dtype=i.dtype, device=i.device)
+    elif pad_mode == 'fill':
+        if mode == 'head':
+            pad = torch.index_select(i, dim=dim, index=torch.tensor([length-1], device=i.device))
+        elif mode == 'tail':
+            pad = torch.index_select(i, dim=dim, index=torch.tensor([0], device=i.device))
+        else:
+            raise Exception('mode: head or tail')
+    else:
+        raise Exception('pad_mode: zeros or fill')
+
+    i_plus_1 = chomp(i.clone(), mode, dim=dim, bite_size=bite_size)
+    if mode == 'head':
+        i_plus_1 = torch.cat((i_plus_1, pad), dim=dim)
+    elif mode == 'tail':
+        i_plus_1 = torch.cat((pad, i_plus_1), dim=dim)
+    else:
+        raise Exception('mode: head or tail')
+
     return i_plus_1
 
 

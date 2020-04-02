@@ -76,19 +76,36 @@ class SARDataset(Dataset):
 
 
 class RewDataset:
-    def __init__(self, buffer, prefix_len):
+    def __init__(self, buffer, prefix_len, prefix_mode='stack'):
         """ used to train functions that predict when a reward will be received"""
         self.b = buffer
         self.prefix_len = prefix_len
+        self.prefix_mode = prefix_mode
 
     def __len__(self):
         return sum([len(trajectory) for trajectory in self.b.trajectories])
 
+    def _one_hot(self, reward):
+        """
+        :return: positive reward : 2
+        negative reward: 0
+        zero reward 1
+        """
+        if reward < 0:
+            return 0
+        elif reward > 0:
+            return 2
+        else:
+            return 1
+
     def __getitem__(self, item):
         step = self.b.get_step(item)
         sequence = self.b.get_sequence(item, self.prefix_len)
-        states = np.concatenate([item.state for item in sequence], axis=0)
-        return states, step.reward
+        if self.prefix_mode == 'stack':
+            states = np.stack([item.state for item in sequence], axis=0)
+        else:
+            states = np.concatenate([item.state for item in sequence], axis=0)
+        return states, step.reward, self._one_hot(step.reward)
 
     def weights(self):
         """probabilites to rebalance for sparse rewards"""
@@ -105,11 +122,48 @@ class RewDataset:
         return weights
 
 
-class DoneDataset:
+class RewardSubsequenceDataset:
     def __init__(self, buffer, prefix_len):
+        """
+        used to train functions that predict when a reward will be received
+        extracts subsequences from the trjactory of len prefix_len
+        such that 50% have reward and 50% have no reward
+        """
+        self.b = buffer
+        self.prefix_len = prefix_len
+        self.has_reward = []
+        self.no_reward = []
+        self._find_subsequences_with_reward()
+
+    def _find_subsequences_with_reward(self):
+        for i, (trajectory, t) in enumerate(self.b.index):
+            step = self.b.trajectories[trajectory][t]
+            if step.reward != 0:
+                self.has_reward.append(i)
+            else:
+                self.no_reward.append(i)
+
+    def __len__(self):
+        return len(self.has_reward) * 2
+
+    def __getitem__(self, item):
+        if random.random() > 0.5:
+            index = self.has_reward[random.randint(0, len(self.has_reward) - 1)]
+        else:
+            index = self.no_reward[random.randint(0, len(self.no_reward) - 1)]
+        step = self.b.get_step(index)
+        sequence = self.b.get_sequence(index, self.prefix_len)
+        states = np.stack([item.state for item in sequence], axis=0)
+        return states, step.reward
+
+
+
+class DoneDataset:
+    def __init__(self, buffer, prefix_len, prefix_mode='stack'):
         """ used to train functions that predict the terminal state"""
         self.b = buffer
         self.prefix_len = prefix_len
+        self.prefix_mode = prefix_mode
         # ensure we didnt make a mistake counting terminal states
         assert self.b.done_count == len(self.b.trajectories)
 
@@ -119,7 +173,12 @@ class DoneDataset:
     def __getitem__(self, item):
         step = self.b.get_step(item)
         sequence = self.b.get_sequence(item, self.prefix_len)
-        states = np.concatenate([item.state for item in sequence], axis=0)
+        if self.prefix_mode == 'cat':
+            states = np.concatenate([item.state for item in sequence], axis=0)
+        elif self.prefix_mode == 'stack':
+            states = np.stack([item.state for item in sequence], axis=0)
+        else:
+            raise Exception('prefix_mode is cat or stack')
         return states, np.array([step.done], dtype=np.float32)
 
     def weights(self):
