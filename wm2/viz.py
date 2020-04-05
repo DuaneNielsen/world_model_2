@@ -102,6 +102,8 @@ def display_predictions(trajectory_mu, trajectory_stdev=None, trajectory_covar=N
 
                 elif label == 'ball':
                     image = put_gaussian(image_size, mu[t], covar=covar[t]).squeeze()
+                elif label == 'reward':
+                    return
                 else:
                     raise Exception(f'label {label} not found')
 

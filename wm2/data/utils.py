@@ -47,17 +47,19 @@ def chomp(seq, end, dim, bite_size):
 
 
 def pad_collate(batch):
-    longest = max([trajectory['state'].shape[0] for trajectory in batch])
-    data = pad(batch, longest)
-    dtype = data[next(iter(data))].dtype
-    mask = make_mask(batch, longest, dtype=dtype)
-    data['mask'] = mask
-    for key in data:
-        data[key] = torch.from_numpy(data[key])
+    #longest = max([trajectory['state'].shape[0] for trajectory in batch])
+    #data = pad(batch, longest)
+    #dtype = data[next(iter(data))].dtype
+    #mask = make_mask(batch, longest, dtype=dtype)
+    #data['mask'] = mask
+    # todo temporary fix until we support batches of trajectories
+    data = {}
+    for key in batch[0]:
+        data[key] = torch.from_numpy(batch[0][key]).unsqueeze(0)
     return TensorNamespace(**data)
 
 
-def autoregress(state, action, reward, mask, target_start=0, target_length=None, target_reward=False, advance=1):
+def autoregress(state, action, reward, mask, target_start=0, target_length=None, advance=1):
     """
 
     :param state: (N, T, S)
@@ -66,7 +68,6 @@ def autoregress(state, action, reward, mask, target_start=0, target_length=None,
     :param mask: (N, T, 1)
     :param target_start: start index of a slice across the state dimension to output as target
     :param target_length: length of slice across the state dimension to output as target
-    :param target_reward: outputs reward as the target
     :param advance: the amount of timesteps to advance the target, default 1
     :return:
     source: concatenated (state, action, reward),
@@ -74,10 +75,7 @@ def autoregress(state, action, reward, mask, target_start=0, target_length=None,
     mask: loss_mask that is zero where padding was put, or where it makes no sense to make a prediction
     """
     source = torch.cat((state, reward), dim=2)
-    if target_reward:
-        target = reward
-    else:
-        target = state.clone()
+    target = source.clone()
     if target_length is not None:
         target = target.narrow(dim=2, start=target_start, length=target_length)
 

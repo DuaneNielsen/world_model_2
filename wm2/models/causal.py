@@ -166,7 +166,7 @@ class Encoder(nn.Module):
         return z.permute(0, 2, 1)
 
 class Decoder(nn.Module):
-    def __init__(self, state_dims, action_dims, reward_dims, hidden_state_dims, target_len, layers=2, dropout=0.8):
+    def __init__(self, state_dims, action_dims, reward_dims, hidden_state_dims, target_len, layers=2, dropout=0.2):
         super().__init__()
         input_channels = state_dims + action_dims + reward_dims
         self.layers = layers

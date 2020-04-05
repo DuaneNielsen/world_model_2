@@ -22,7 +22,7 @@ class TensorNamespace(SimpleNamespace):
 
 
 class Pbar:
-    def __init__(self, epochs, train_len, batch_size, label, train_depth=None, checkpoint_secs=60):
+    def __init__(self, items_to_process, train_len, batch_size, label, train_depth=None, checkpoint_secs=60):
         """
 
         :param epochs: number of epochs to train
@@ -33,7 +33,8 @@ class Pbar:
         :param checkpoint_secs: the number of seconds before saving a checkpoint
         if not set will default to 10 or the number of minibatches per epoch, whichever is lower
         """
-        self.bar = tqdm(total=epochs * train_len)
+        self.bar = tqdm(total=items_to_process)
+        self.items_processed = 0
         self.label = label
         depth = train_depth if train_depth is not None else min(train_len//batch_size, 10)
         self.loss_move_ave = deque(maxlen=depth)
@@ -44,16 +45,17 @@ class Pbar:
         self.best_loss = sys.float_info.max
         self.checkpoint_cooldown = Cooldown(checkpoint_secs)
 
-    def update_train_loss_and_checkpoint(self, loss, models=None, epoch=None, optimizer=None):
+    def update_train_loss_and_checkpoint(self, loss, models=None, optimizer=None):
         self.test = []
         self.loss_move_ave.append(loss.item())
         self.train_loss = mean(list(self.loss_move_ave))
         self.bar.update(self.batch_size)
+        self.items_processed += self.batch_size
         wandb.log({f'{self.label}_train_loss': loss.item()})
         self.bar.set_description(f'{self.label} train_loss: {self.train_loss:.6f} test_loss: {self.test_loss:.6f}')
         if models is not None and self.checkpoint_cooldown:
             save = {}
-            save['epoch'] = epoch
+            save['items_processed'] = self.items_processed
             save['optimizer_state_dict'] = optimizer.state_dict()
             for name, model in models.items():
                 save[name] = model.state_dict()

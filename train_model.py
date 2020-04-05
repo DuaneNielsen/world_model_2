@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pickle
 from pathlib import Path
 from collections import deque
+from math import floor
 
 import gym
 import numpy as np
@@ -26,12 +27,11 @@ from wm2.models.causal import Causal
 import utils
 import models.causal
 
-
 viewer = UniImageViewer()
 
 
 def reward_value_estimator(state_dict=None):
-    model = models.causal.RewardNet(4, [512, 512], 1,  scale=1.2)
+    model = models.causal.RewardNet(4, [512, 512], 1, scale=1.2)
     if state_dict is not None:
         model.load_state_dict(state_dict)
     return model
@@ -186,31 +186,30 @@ def load_or_generate(env, n, path=None):
     return buff
 
 
-def make_future_seq(inp, future_timesteps=3):
+def make_future_seq(inp, horizon=3):
     inp_batch = []
     prev_inp = inp.clone()
 
-    for _ in range(future_timesteps):
+    for _ in range(horizon):
         inp_batch += [prev_inp]
         prev_inp = chomp_and_pad(inp, dim=1)
 
     return torch.cat(inp_batch)
 
 
-def train_predictor(mu_encoder, mu_decoder, train_buff, test_buff, epochs, target_start, target_len, label, batch_size,
-                    test_freq=50):
-    train, test = SARDataset(train_buff), SARDataset(test_buff)
-    pbar = Pbar(epochs=epochs, train_len=len(train), batch_size=1, label=label)
-    train = DataLoader(train, batch_size=1, collate_fn=pad_collate, shuffle=True)
-    test = DataLoader(test, batch_size=1, collate_fn=pad_collate, shuffle=True)
+def train_predictor(mu_encoder, mu_decoder, train_buff, test_buff, items_total, target_start, target_len, label,
+                    horizon, batch_size=1, mask_f=None):
+    train, test = SARDataset(train_buff, mask_f=mask_f), SARDataset(test_buff, mask_f=mask_f)
+    pbar = Pbar(items_to_process=items_total, train_len=len(train), batch_size=batch_size, label=label)
+    train = DataLoader(train, batch_size=batch_size, collate_fn=pad_collate, shuffle=True)
+    test = DataLoader(test, batch_size=batch_size, collate_fn=pad_collate, shuffle=True)
 
     optim = Adam(mu_encoder.parameters(), lr=1e-4)
 
     eps = torch.finfo(next(iter(mu_encoder.parameters()))[0].data.dtype).eps
     train_cooldown = utils.Cooldown(secs=wandb.config.display_cooldown)
 
-    for epoch in range(epochs):
-
+    while pbar.items_processed < items_total:
         for mb in train:
             seqs = autoregress(mb.state, mb.action, mb.reward, mb.mask, target_start, target_len).to(device)
             optim.zero_grad()
@@ -220,17 +219,18 @@ def train_predictor(mu_encoder, mu_decoder, train_buff, test_buff, epochs, targe
             h = hidden.repeat(mu_decoder.layers, 1, 1).contiguous()
             c = hidden.clone().repeat(mu_decoder.layers, 1, 1).contiguous()
 
-            inp_future = make_future_seq(inp)
-            tar_future = make_future_seq(seqs.target)
+            inp_future = make_future_seq(inp, horizon=horizon)
+            tar_future = make_future_seq(seqs.target, horizon=horizon)
+            tar_mask = make_future_seq(seqs.mask, horizon=horizon)
 
             mu, (h, c) = mu_decoder(inp_future, (h, c))
 
-            loss = ((mu - tar_future) ** 2).mean()
+            loss = (((mu - tar_future) ** 2) * tar_mask).mean()
             loss.backward()
             optim.step()
 
             pbar.update_train_loss_and_checkpoint(loss, models={'encoder': mu_encoder,
-                                                                'decoder': mu_decoder}, epoch=epoch, optimizer=optim)
+                                                                'decoder': mu_decoder}, optimizer=optim)
 
             if train_cooldown():
                 with torch.no_grad():
@@ -239,8 +239,9 @@ def train_predictor(mu_encoder, mu_decoder, train_buff, test_buff, epochs, targe
                         inp = torch.cat((seqs.source, seqs.action), dim=2)
                         hidden = mu_encoder(inp)
 
-                        inp_future = make_future_seq(inp)
-                        tar_future = make_future_seq(seqs.target)
+                        inp_future = make_future_seq(inp, horizon)
+                        tar_future = make_future_seq(seqs.target, horizon)
+                        tar_mask = make_future_seq(seqs.mask, horizon)
 
                         samples = []
                         for _ in range(10):
@@ -253,7 +254,7 @@ def train_predictor(mu_encoder, mu_decoder, train_buff, test_buff, epochs, targe
 
                         mu = samples.mean(dim=0)
 
-                        loss = ((mu - tar_future) ** 2).mean()
+                        loss = (((mu - tar_future) ** 2) * tar_mask).mean()
 
                         covar = compute_covar(samples, mu)
                         # wandb.log({f'test_{label}_entropy': dist.entropy().mean()})
@@ -277,83 +278,146 @@ class Extrapolation:
         self.done = None
         self.reward_class = None
         self.reward_value = None
+        self.imagining = None
+        self.start_seq = None
         self._load(config, load_dir)
 
     def _load(self, config, load_dir):
         for label, args in config.items():
             encoder = models.causal.Encoder(args.state_dims, args.action_dims, args.reward_dims, args.hidden,
-                                               output_dims=args.hidden_state_dims).to(device)
+                                            output_dims=args.hidden_state_dims).to(device).eval()
             decoder = models.causal.Decoder(args.state_dims, args.action_dims, args.reward_dims, args.hidden_state_dims,
-                                               args.target_len).to(device)
+                                            args.target_len).to(device)
             state_dicts = Pbar.best_state_dict(load_dir, label)
             encoder.load_state_dict(state_dicts['encoder'])
             decoder.load_state_dict(state_dicts['decoder'])
             self.encoders[label] = encoder
             self.decoders[label] = decoder
 
-        self.reward_value = reward_value_estimator(Pbar.best_state_dict(load_dir, 'reward_value')['reward'])
+        # self.reward_value = reward_value_estimator(Pbar.best_state_dict(load_dir, 'reward_value')['reward'])
+        #
+        # self.reward_class = reward_class_estimator(
+        #     Pbar.best_state_dict(load_dir, 'reward_class')['reward'])
 
-        self.reward_class = reward_class_estimator(
-            Pbar.best_state_dict(load_dir, 'reward_class')['reward'])
-
-    def extrapolate(self, trajectories, extrap_len=3):
+    def extrapolate(self, trajectories, samples=20, horizon=10):
         with torch.no_grad():
             self.seqs = autoregress(trajectories.state, trajectories.action, trajectories.reward,
                                     trajectories.mask).to(device)
-            inp = torch.cat((self.seqs.source, self.seqs.action), dim=2)
-            #seq = torch.empty_like(self.seqs.source)
+            self.start_seq = torch.cat((self.seqs.source, self.seqs.action), dim=2)
+
             h = {}
             c = {}
             out = {}
+            B, T, L, D = samples, self.seqs.source.size(1), horizon, self.seqs.source.size(2) + self.seqs.action.size(2)
 
-            for _ in range(10):
+            self.imagining = torch.empty(B, T, L, D, device=self.start_seq.device)
+
+            for b in range(B):
                 for k, args in self.config.items():
-                    hidden = self.encoders[k](inp)
+                    hidden = self.encoders[k](self.start_seq)
                     h[k] = hidden.repeat(self.decoders[k].layers, 1, 1).contiguous()
                     c[k] = hidden.clone().repeat(self.decoders[k].layers, 1, 1).contiguous()
-                for t in range(extrap_len):
+                inp = self.start_seq.clone()
+                for t in range(horizon):
                     for k, args in self.config.items():
                         out[k], (h[k], c[k]) = self.decoders[k](inp, (h[k], c[k]))
-                    state = torch.cat((out['player'], out['enemy'], out['ball']), dim=2)
-                    reward_class = self.reward_class(state)
+                    state = torch.cat((out['player'], out['enemy'], out['ball'], out['reward']), dim=2)
                     action_shape = list(inp.shape)
                     action_shape[2] = 6
                     action = torch.zeros(*action_shape, device=state.device)
                     action[0, torch.arange(action.size(1)), torch.randint(0, 5, (action.size(1),))] = 1.0
-                    inp = torch.cat((state, reward, action), dim=2)
-                    self.samples[k] += [inp]
+                    inp = torch.cat((state, action), dim=2)
+                    self.imagining[b, torch.arange(T), t] = inp[0, torch.arange(T)]
 
                 # seq[:, :, args.target_start:args.target_start + args.target_len] = samples[k]
-                self.samples[k] = torch.stack(self.samples[k])
-                self.mu[k] = self.samples[k].mean(dim=0)
-                self.covar[k] = compute_covar(self.samples[k], self.mu[k])
+                # self.samples[k] = torch.stack(self.samples[k])
+                # self.mu[k] = self.samples[k].mean(dim=0)
+                # self.covar[k] = compute_covar(self.samples[k], self.mu[k])
 
             # for k, v in ensemble.items():
             #     samples[k] = simple_sample(1, self.mu[k], self.covar[k])
 
-    def play(self, trajectory_id, max_length=100, fps=6, image_size=(240 * 4, 160 * 4)):
-        mask_len = self.seqs.mask[trajectory_id].sum()
-        length = min(mask_len, max_length)
-        for step in range(length):
+    # def play(self, trajectory_id, max_length=100, fps=6, image_size=(240 * 4, 160 * 4)):
+    #     mask_len = self.seqs.mask[trajectory_id].sum()
+    #     length = min(mask_len, max_length)
+    #     for step in range(length):
+    #         frame = []
+    #         for k in self.config:
+    #             if self.config[k].target_len == 1:
+    #                 config = self.config[k]
+    #                 channel = put_strip(image_size, config.x, config.thickness, dim=config.dim,
+    #                                     mu=self.mu[k][trajectory_id, step],
+    #                                     covar=self.covar[k][trajectory_id, step])
+    #                 frame.append(channel)
+    #             elif self.config[k].target_len == 2:
+    #                 channel = put_gaussian(image_size, mu=self.mu[k][trajectory_id, step],
+    #                                        covar=self.covar[k][trajectory_id, step])
+    #                 frame.append(channel.squeeze())
+    #
+    #         image = np.stack(frame)
+    #         debug_image(image, block=False)
+    #         sleep(1 / fps)
+
+    def draw(self, image, image_size, x_b, y_b, color):
+        for x, y in zip(x_b, y_b):
+            x = x.item() if isinstance(x, torch.Tensor) else x
+            y = y.item() if isinstance(y, torch.Tensor) else y
+            x = min(x, 0.999)
+            y = min(y, 0.999)
+            x, y = floor(x * image_size[0]), floor(y * image_size[1])
+            image[x, y, :] += torch.tensor(color, dtype=torch.uint8)
+
+    def play(self, max_length=100, fps=6, image_size=(240 * 4, 160 * 4)):
+
+        B, T, L, D = self.imagining.shape
+
+        T = min(max_length, T)
+        for t in range(T):
             frame = []
-            for k in self.config:
-                if self.config[k].target_len == 1:
-                    config = self.config[k]
-                    channel = put_strip(image_size, config.x, config.thickness, dim=config.dim,
-                                        mu=self.mu[k][trajectory_id, step],
-                                        covar=self.covar[k][trajectory_id, step])
-                    frame.append(channel)
-                elif self.config[k].target_len == 2:
-                    channel = put_gaussian(image_size, mu=self.mu[k][trajectory_id, step],
-                                           covar=self.covar[k][trajectory_id, step])
-                    frame.append(channel.squeeze())
+            for l in range(L):
+                image = torch.zeros(*image_size, 3, dtype=torch.uint8)
+                for k, args in self.config.items():
+                    if args.target_len == 2:
+                        y_b, x_b = [self.start_seq[0, t, args.target_start]], [self.start_seq[0, t, args.target_start + 1]]
+                        self.draw(image, image_size, x_b, y_b, [0, 0, 255])
+                    elif hasattr(args, 'x'):
+                        y_b, x_b = [args.x], [self.start_seq[0, t, args.target_start]]
+                        self.draw(image, image_size, x_b, y_b, [0, 0, 255])
+                    else:
+                        y_b, x_b = [], []
+                        self.draw(image, image_size, x_b, y_b, [0, 0, 255])
 
-            image = np.stack(frame)
+                for k, args in self.config.items():
+                    if args.target_len == 2:
+                        y_b, x_b = self.imagining[torch.arange(B), t, l, args.target_start], self.imagining[torch.arange(B), t, l, args.target_start + 1]
+                        self.draw(image, image_size, x_b, y_b, [255, 255, 255])
+                    elif hasattr(args, 'x'):
+                        y_b, x_b = torch.ones(B) * args.x, self.imagining[torch.arange(B), t, l, args.target_start]
+                        self.draw(image, image_size, x_b, y_b, [255, 255, 0])
+                    else:
+                        y_b, x_b = [], []
+                        self.draw(image, image_size, x_b, y_b, [0, 255, 0])
+
+                frame.append(image)
+                frame.append(torch.ones((image_size[0], 5, 3), dtype=torch.uint8) * 255)
+            image = torch.cat(frame, dim=1).cpu().numpy()
+            #image = (image.cpu().numpy() * 255).astype(np.uint)
             debug_image(image, block=False)
-            sleep(1 / fps)
+            sleep(1/fps)
 
 
-def main():
+def reward_mask_f(state, reward, action):
+    r = np.concatenate(reward)
+    nonzero = r != 0
+    p = np.ones_like(r)
+    p = p / (r.shape[0] - nonzero.sum())
+    p = p * ~nonzero
+    i = np.random.choice(r.shape[0], nonzero.sum(), p=p)
+    nonzero[i] = True
+    return nonzero[:, np.newaxis]
+
+
+def main(ensemble, load_dir):
     env = gym.make('PongNoFrameskip-v4')
     env = wrappers.NoopResetEnv(env, noop_max=30)
     env = wrappers.MaxAndSkipEnv(env, skip=4)
@@ -369,38 +433,19 @@ def main():
     train_buff = load_or_generate(env, wandb.config.train_len, str(train_buff_path))
     test_buff = load_or_generate(env, wandb.config.test_len, str(test_buff_path))
 
-    ensemble = {}
-    ensemble['player'] = SimpleNamespace(state_dims=4, action_dims=6, reward_dims=1, hidden=[512, 512, 512, 512], hidden_state_dims=512, epochs=100,
-                                         target_start=0,
-                                         target_len=1,
-                                         x=0.9, thickness=0.05, dim=1)
-    ensemble['enemy'] = SimpleNamespace(state_dims=4, action_dims=6, reward_dims=1, hidden=[512, 512, 512, 512], hidden_state_dims=512, epochs=200, target_start=1,
-                                        target_len=1,
-                                        x=0.3, thickness=0.05, dim=1)
-    ensemble['ball'] = SimpleNamespace(state_dims=4, action_dims=6, reward_dims=1, hidden=[512, 512, 512, 512], hidden_state_dims=512, epochs=500, target_start=2,
-                                       target_len=2)
-
-
-    # wandb.config.demo = False
-    load_dir = 'wandb/dryrun-20200401_061120-1i0saqke'
-    load_reward_done_dir = ''
-
     if not wandb.config.demo:
-        train_reward_class(train_buff, test_buff, epochs=50, test_freq=3)
-        train_reward_value(train_buff, test_buff, epochs=50, test_freq=3)
-        train_done(train_buff, test_buff, epochs=10, test_freq=3)
-
         for label, args in ensemble.items():
             mu_encoder = models.causal.Encoder(args.state_dims, args.action_dims, args.reward_dims, args.hidden,
                                                output_dims=args.hidden_state_dims).to(device)
-            mu_decoder = models.causal.Decoder(args.state_dims, args.action_dims, args.reward_dims, args.hidden_state_dims,
+            mu_decoder = models.causal.Decoder(args.state_dims, args.action_dims, args.reward_dims,
+                                               args.hidden_state_dims,
                                                args.target_len).to(device)
             models.causal.init(mu_encoder, torch.nn.init.kaiming_normal)
             train_predictor(mu_encoder=mu_encoder, mu_decoder=mu_decoder,
-                            train_buff=train_buff, test_buff=test_buff, epochs=args.epochs,
+                            train_buff=train_buff, test_buff=test_buff, items_total=args.items_total,
                             target_start=args.target_start, target_len=args.target_len,
-                            label=label, batch_size=wandb.config.predictor_batchsize,
-                            test_freq=wandb.config.test_freq)
+                            horizon=wandb.config.horizon,
+                            label=label, batch_size=1, mask_f=args.mask_f)
 
     else:
 
@@ -409,49 +454,65 @@ def main():
         ex = Extrapolation(ensemble, load_dir)
 
         for mb in test:
-            ex.extrapolate(mb)
-            ex.play(trajectory_id=0, max_length=1000)
-            ex.play(trajectory_id=1, max_length=1000)
+            ex.extrapolate(mb, horizon=wandb.config.horizon)
+            ex.play(max_length=1000)
 
 
 if __name__ == '__main__':
+
+
+
     test = dict(mode='test',
-                frame_op_len=8,
+                display_cooldown=60,
                 train_len=512,
                 test_len=16,
-                predictor_batchsize=32,
-                render=False,
-                rew_prefix_length=4,
-                rew_batchsize=32,
-                done_prefix_len=4,
-                done_batchsize=32,
-                test_freq=30,
-                display_cooldown=60,
                 device='cuda:0',
+                horizon=20,
                 demo=False)
 
     dev = dict(mode='dev',
-               frame_op_len=8,
                train_len=2,
                test_len=2,
-               predictor_batchsize=2,
                render=False,
-               rew_prefix_length=4,
-               rew_batchsize=256,
-               done_prefix_len=4,
-               done_batchsize=256,
-               test_freq=300,
                display_cooldown=30,
                device='cuda:1',
+               horizon=20,
                demo=True)
 
-    wandb.init(config=dev)
+    ensemble = {}
+    ensemble['player'] = SimpleNamespace(state_dims=4, action_dims=6, reward_dims=1, hidden=[512, 512, 512, 512],
+                                         hidden_state_dims=512, items_total=10000,
+                                         target_start=0,
+                                         target_len=1,
+                                         x=0.9, thickness=0.05, dim=1, mask_f=None)
+    # perhaps 10k minibatch updates is enough
+    ensemble['enemy'] = SimpleNamespace(state_dims=4, action_dims=6, reward_dims=1, hidden=[512, 512, 512, 512],
+                                        hidden_state_dims=512, items_total=10000, target_start=1,
+                                        target_len=1,
+                                        x=0.3, thickness=0.05, dim=1, mask_f=None)
+    ensemble['ball'] = SimpleNamespace(state_dims=4, action_dims=6, reward_dims=1, hidden=[512, 512, 512, 512],
+                                       hidden_state_dims=512, items_total=20000, target_start=2,
+                                       target_len=2, mask_f=None)
+    ensemble['reward'] = SimpleNamespace(state_dims=4, action_dims=6, reward_dims=1, hidden=[512, 512, 512, 512],
+                                         hidden_state_dims=512, items_total=10000, target_start=4,
+                                         target_len=1, mask_f=reward_mask_f)
 
-    # config validations
-    config = wandb.config
-    assert config.predictor_batchsize <= config.train_len
-    assert config.test_len >= 2
+    # horizon 3
+    #load_dir = 'wandb/dryrun-20200402_051722-39ai7s4u'
+    # load_dir = 'wandb/dryrun-20200403_003603-u0rp7alj'
+    # horizon 10
+    #load_dir = 'wandb/dryrun-20200405_002951-fx78ujfz'
+    # horizon 20
+    load_dir = 'wandb/dryrun-20200405_014940-5r9oulbl'
+
+    wandb.init(config=test)
+
+    if wandb.config.mode == 'dev':
+        ensemble['player'].items_total = 1000
+        ensemble['enemy'].items_total = 1000
+        ensemble['ball'].items_total = 1000
+        ensemble['reward'].items_total = 1000
 
     device = wandb.config.device
 
-    main()
+    main(ensemble, load_dir)
