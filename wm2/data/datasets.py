@@ -195,6 +195,33 @@ class RewardSubsequenceDataset:
         return states, step.reward
 
 
+class SDDataset:
+    def __init__(self, buffer):
+        """  Returns the done states and a balanced random sample of the not done states"""
+        self.b = buffer
+        assert self.b.done_count == len(self.b.trajectories)
+
+    def __len__(self):
+        return len(self.b.index)
+
+    def __getitem__(self, item):
+        step = self.b.get_step(item)
+        return step.state, np.array([step.done]).astype(np.float32)
+
+    def weights(self):
+        """probabilites to rebalance for sparse done"""
+        w_done = 1 / self.b.done_count * 0.5
+        w_not_done = 1 / (len(self) - self.b.done_count) * 0.5
+
+        weights = []
+        for t in self.b.trajectories:
+            for step in t:
+                if step.done:
+                    weights.append(w_done)
+                else:
+                    weights.append(w_not_done)
+        return weights
+
 
 class DoneDataset:
     def __init__(self, buffer, prefix_len, prefix_mode='stack'):
@@ -220,7 +247,7 @@ class DoneDataset:
         return states, np.array([step.done], dtype=np.float32)
 
     def weights(self):
-        """probabilites to rebalance for sparse rewards"""
+        """probabilites to rebalance for sparse done"""
         w_done = 1 / self.b.done_count * 0.5
         w_not_done = 1 / (len(self) - self.b.done_count) * 0.5
 

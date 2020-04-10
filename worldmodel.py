@@ -3,12 +3,13 @@ from types import SimpleNamespace
 import torch
 import torch.nn as nn
 from torch.optim import Adam
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
+import torch.nn.functional as F
 import numpy as np
 import wandb
 
 from distributions import TanhTransformedGaussian
-from wm2.data.datasets import Buffer, SARDataset, SARNextDataset
+from wm2.data.datasets import Buffer, SARDataset, SARNextDataset, SDDataset
 from wm2.utils import Pbar
 from data.utils import pad_collate_2
 
@@ -95,6 +96,10 @@ def main(args):
     R = nn.Linear(1, 1)
     R_optim = Adam(R.parameters(), lr=1e-4)
 
+    # terminal state model
+    D = nn.Linear(1, 1)
+    D_optim = Adam(D.parameters(), lr=1e-4)
+
     converged = False
 
     while not converged:
@@ -143,6 +148,30 @@ def main(args):
                 for trajectory in test:
                     predicted_reward = R(trajectory.state)
                     loss = (((trajectory.reward - predicted_reward) * trajectory.mask) ** 2).mean()
+                    pbar.update_test_loss_and_save_model(loss)
+
+            # Terminal state learning
+            train, test = SDDataset(train_buff), SDDataset(test_buff)
+            train_weights, test_weights = train.weights(), test.weights()
+            train_sampler = WeightedRandomSampler(train_weights, len(train_weights))
+            test_sampler = WeightedRandomSampler(test_weights, len(test_weights))
+            train = DataLoader(train, batch_size=32, sampler=train_sampler, drop_last=False)
+            test = DataLoader(test, batch_size=32, sampler=test_sampler, drop_last=False)
+            pbar = Pbar(items_to_process=len(train) * 2, train_len=len(train),
+                        batch_size=args.batch_size, label='terminal')
+            while pbar.items_processed < len(train) * 2:
+
+                for state, done in train:
+                    D_optim.zero_grad()
+                    predicted_done = D(state)
+                    loss = F.binary_cross_entropy_with_logits(predicted_done, done)
+                    loss.backward()
+                    D_optim.step()
+                    pbar.update_train_loss_and_checkpoint(loss)
+
+                for state, done in test:
+                    predicted_done = D(state)
+                    loss = F.binary_cross_entropy_with_logits(predicted_done, done)
                     pbar.update_test_loss_and_save_model(loss)
 
             # Behaviour learning
