@@ -144,6 +144,7 @@ class DoneNet(nn.Module):
         z = self.tcn(inp)
         return z.permute(0, 2, 1)
 
+
 class Encoder(nn.Module):
     def __init__(self, state_dims, action_dims, reward_dims, hidden_layers, output_dims, nonlin=None):
         super().__init__()
@@ -164,6 +165,7 @@ class Encoder(nn.Module):
         inp = inp.permute(0, 2, 1)
         z = self.tcn(inp)
         return z.permute(0, 2, 1)
+
 
 class Decoder(nn.Module):
     def __init__(self, state_dims, action_dims, reward_dims, hidden_state_dims, target_len, layers=2, dropout=0.2):

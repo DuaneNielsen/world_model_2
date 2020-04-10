@@ -59,6 +59,18 @@ def pad_collate(batch):
     return TensorNamespace(**data)
 
 
+def pad_collate_2(batch):
+    """
+    returns batch in [T, B, D] format (timesteps, Batch, dimensions)
+    :param batch:
+    :return:
+    """
+    data = {}
+    for key in batch[0]:
+        data[key] = torch.from_numpy(batch[0][key]).unsqueeze(1)
+    return TensorNamespace(**data)
+
+
 def autoregress(state, action, reward, mask, target_start=0, target_length=None, advance=1):
     """
 

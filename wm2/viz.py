@@ -84,31 +84,35 @@ def display_predictions(trajectory_mu, trajectory_stdev=None, trajectory_covar=N
         image_size = (240 * scale, 160 * scale)
 
         for step in range(length):
-            mu = trajectory_mu[:, step]
-            covar = trajectory_covar[:, step]
-            panel = []
-            for t in range(max_lookahead):
-                if label == 'all':
-                    player = put_strip(image_size, 0.9, 0.05, dim=1, mu=mu[0], covar=covar[0])
-                    enemy = put_strip(image_size, 0.3, 0.05, dim=1, mu=mu[1], covar=covar[1])
-                    ball = put_gaussian(image_size, mu[2:4], covar[2:4])
-                    image = np.stack((player, enemy, ball.squeeze()))
+            try:
+                mu = trajectory_mu[:, step]
+                covar = trajectory_covar[:, step]
+                panel = []
+                for t in range(max_lookahead):
+                    if label == 'all':
+                        player = put_strip(image_size, 0.9, 0.05, dim=1, mu=mu[0], covar=covar[0])
+                        enemy = put_strip(image_size, 0.3, 0.05, dim=1, mu=mu[1], covar=covar[1])
+                        ball = put_gaussian(image_size, mu[2:4], covar[2:4])
+                        image = np.stack((player, enemy, ball.squeeze()))
 
-                elif label == 'player':
-                    image = put_strip(image_size, 0.9, 0.05, dim=1, mu=mu[t], covar=covar[t])
+                    elif label == 'player':
+                        image = put_strip(image_size, 0.9, 0.05, dim=1, mu=mu[t], covar=covar[t])
 
-                elif label == 'enemy':
-                    image = put_strip(image_size, 0.9, 0.05, dim=1, mu=mu[t], covar=covar[t])
+                    elif label == 'enemy':
+                        image = put_strip(image_size, 0.9, 0.05, dim=1, mu=mu[t], covar=covar[t])
 
-                elif label == 'ball':
-                    image = put_gaussian(image_size, mu[t], covar=covar[t]).squeeze()
-                elif label == 'reward':
-                    return
-                else:
-                    raise Exception(f'label {label} not found')
+                    elif label == 'ball':
+                        image = put_gaussian(image_size, mu[t], covar=covar[t]).squeeze()
+                    elif label == 'reward':
+                        return
+                    else:
+                        raise Exception(f'label {label} not found')
 
-                panel.append(image)
+                    panel.append(image)
 
-            image = np.concatenate(panel, axis=1)
-            debug_image(image, block=False)
-            sleep(1 / fps)
+                image = np.concatenate(panel, axis=1)
+                debug_image(image, block=False)
+                sleep(1 / fps)
+
+            except RuntimeError:
+                print('Runtime Error')

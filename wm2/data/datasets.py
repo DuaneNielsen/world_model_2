@@ -75,12 +75,42 @@ class SARDataset(Dataset):
         for step in trajectory:
             state += [step.state]
             reward += [step.reward]
-            action += [one_hot(step.action, self.b.action_max)]
+            if isinstance(step.action, int):
+                action += [one_hot(step.action, self.b.action_max)]
+            else:
+                action += [step.action]
 
         return {'state': np.stack(state),
                 'action': np.stack(action),
                 'reward': np.stack(reward),
                 'mask': self.mask_f(state, reward, action)}
+
+
+class SARNextDataset(Dataset):
+    def __init__(self, buffer, mask_f=None):
+        super().__init__()
+        self.b = buffer
+        self.mask_f = mask_f if mask_f is not None else mask_all
+
+    def __len__(self):
+        return len(self.b.trajectories)
+
+    def __getitem__(self, item):
+        trajectory = self.b.trajectories[item]
+        state, reward, action, mask = [], [], [], []
+        for step in trajectory:
+            state += [step.state]
+            reward += [step.reward]
+            if isinstance(step.action, int):
+                action += [one_hot(step.action, self.b.action_max)]
+            else:
+                action += [step.action]
+
+        return {'state': np.stack(state[:-1]),
+                'action': np.stack(action[:-1]),
+                'reward': np.stack(reward[:-1]),
+                'next_state': np.stack(state[1:]),
+                'mask': self.mask_f(state[:-1], reward[:-1], action[:-1])}
 
 
 class RewDataset:

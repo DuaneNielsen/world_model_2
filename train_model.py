@@ -11,9 +11,11 @@ from atariari.benchmark.wrapper import AtariARIWrapper
 import torch
 from torch.optim import Adam
 import torch.nn as nn
+from torch.distributions import OneHotCategorical
 from torch.utils.data.dataloader import DataLoader
 from torch.utils.data.sampler import WeightedRandomSampler
 import torch.nn.init
+from torch.nn.functional import log_softmax
 import wandb
 
 from data.datasets import SARDataset, RewDataset, DoneDataset, gather_data
@@ -299,35 +301,41 @@ class Extrapolation:
         # self.reward_class = reward_class_estimator(
         #     Pbar.best_state_dict(load_dir, 'reward_class')['reward'])
 
-    def extrapolate(self, trajectories, samples=20, horizon=10):
-        with torch.no_grad():
-            self.seqs = autoregress(trajectories.state, trajectories.action, trajectories.reward,
-                                    trajectories.mask).to(device)
-            self.start_seq = torch.cat((self.seqs.source, self.seqs.action), dim=2)
+    def extrapolate(self, trajectories, policy, optim, samples=1, horizon=10):
 
-            h = {}
-            c = {}
-            out = {}
-            B, T, L, D = samples, self.seqs.source.size(1), horizon, self.seqs.source.size(2) + self.seqs.action.size(2)
+        self.seqs = autoregress(trajectories.state, trajectories.action, trajectories.reward,
+                                trajectories.mask).to(device)
+        self.start_seq = torch.cat((self.seqs.source, self.seqs.action), dim=2)
+        h = {}
+        c = {}
+        out = {}
+        B, T, L, D = samples, self.seqs.source.size(1), horizon, self.seqs.source.size(2) + self.seqs.action.size(2)
 
-            self.imagining = torch.empty(B, T, L, D, device=self.start_seq.device)
-
-            for b in range(B):
+        self.imagining = torch.empty(B, T, L, D, device=self.start_seq.device)
+        optim.zero_grad()
+        for b in range(B):
+            for k, args in self.config.items():
+                hidden = self.encoders[k](self.start_seq)
+                h[k] = hidden.repeat(self.decoders[k].layers, 1, 1).contiguous()
+                c[k] = hidden.clone().repeat(self.decoders[k].layers, 1, 1).contiguous()
+            inp = self.start_seq.clone()
+            for t in range(horizon):
                 for k, args in self.config.items():
-                    hidden = self.encoders[k](self.start_seq)
-                    h[k] = hidden.repeat(self.decoders[k].layers, 1, 1).contiguous()
-                    c[k] = hidden.clone().repeat(self.decoders[k].layers, 1, 1).contiguous()
-                inp = self.start_seq.clone()
-                for t in range(horizon):
-                    for k, args in self.config.items():
-                        out[k], (h[k], c[k]) = self.decoders[k](inp, (h[k], c[k]))
-                    state = torch.cat((out['player'], out['enemy'], out['ball'], out['reward']), dim=2)
-                    action_shape = list(inp.shape)
-                    action_shape[2] = 6
-                    action = torch.zeros(*action_shape, device=state.device)
-                    action[0, torch.arange(action.size(1)), torch.randint(0, 5, (action.size(1),))] = 1.0
-                    inp = torch.cat((state, action), dim=2)
-                    self.imagining[b, torch.arange(T), t] = inp[0, torch.arange(T)]
+                    out[k], (h[k], c[k]) = self.decoders[k](inp, (h[k], c[k]))
+                state = torch.cat((out['player'], out['enemy'], out['ball']), dim=2)
+                # action_shape = list(inp.shape)
+                # action_shape[2] = 6
+                # action = torch.zeros(*action_shape, device=state.device)
+                # action[0, torch.arange(action.size(1)), torch.randint(0, 5, (action.size(1),))] = 1.0
+                action = OneHotCategorical(logits=log_softmax(policy(state), dim=2)).sample()
+                inp = torch.cat((state, out['reward'], action), dim=2)
+                self.imagining[b, torch.arange(T), t] = inp[0, torch.arange(T)]
+
+        value = torch.sum(self.imagining[:, :, :, 5], dim=2)
+        value = - value.mean()
+        value.backward()
+        optim.step()
+        print(value.item())
 
                 # seq[:, :, args.target_start:args.target_start + args.target_len] = samples[k]
                 # self.samples[k] = torch.stack(self.samples[k])
@@ -452,10 +460,13 @@ def main(ensemble, load_dir):
         test = SARDataset(test_buff)
         test = DataLoader(test, batch_size=1, collate_fn=pad_collate)
         ex = Extrapolation(ensemble, load_dir)
+        policy = nn.Sequential(nn.Linear(4, 32), nn.ReLU(), nn.Linear(32, 6)).to(wandb.config.device)
+        optim = torch.optim.Adam(policy.parameters(), lr=1e-4)
 
-        for mb in test:
-            ex.extrapolate(mb, horizon=wandb.config.horizon)
-            ex.play(max_length=1000)
+        for epoch in range(100):
+            for mb in test:
+                ex.extrapolate(mb, policy, optim, horizon=wandb.config.horizon, samples=wandb.config.samples)
+                #ex.play(max_length=1000)
 
 
 if __name__ == '__main__':
@@ -463,12 +474,13 @@ if __name__ == '__main__':
 
 
     test = dict(mode='test',
-                display_cooldown=60,
+                display_cooldown=240,
                 train_len=512,
                 test_len=16,
                 device='cuda:0',
-                horizon=20,
-                demo=False)
+                horizon=10,
+                samples=4,
+                demo=True)
 
     dev = dict(mode='dev',
                train_len=2,
@@ -476,7 +488,8 @@ if __name__ == '__main__':
                render=False,
                display_cooldown=30,
                device='cuda:1',
-               horizon=20,
+               horizon=6,
+               samples=2,
                demo=True)
 
     ensemble = {}
@@ -503,9 +516,9 @@ if __name__ == '__main__':
     # horizon 10
     #load_dir = 'wandb/dryrun-20200405_002951-fx78ujfz'
     # horizon 20
-    load_dir = 'wandb/dryrun-20200405_014940-5r9oulbl'
+    load_dir = 'wandb/run-20200405_182039-5y0p6qwg'
 
-    wandb.init(config=test)
+    wandb.init(config=dev)
 
     if wandb.config.mode == 'dev':
         ensemble['player'].items_total = 1000
