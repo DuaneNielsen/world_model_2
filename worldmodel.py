@@ -1,9 +1,11 @@
 from types import SimpleNamespace
+from collections import deque
+from statistics import mean
 
 import torch
 import torch.nn as nn
 from torch.optim import Adam
-from torch.utils.data import DataLoader, WeightedRandomSampler
+from torch.utils.data import DataLoader, WeightedRandomSampler, ConcatDataset
 import torch.nn.functional as F
 import numpy as np
 import wandb
@@ -41,8 +43,7 @@ def prepro(state):
     return torch.tensor(state).unsqueeze(0)
 
 
-def gather_seed_episodes(seed_episodes):
-    env = LinEnv()
+def gather_seed_episodes(env, seed_episodes):
     buff = Buffer()
     dist = TanhTransformedGaussian(0.0, 0.5)
 
@@ -81,8 +82,14 @@ def reward_mask_f(state, reward, action):
 
 
 def main(args):
-    train_buff = gather_seed_episodes(args.seed_episodes)
-    test_buff = gather_seed_episodes(args.seed_episodes)
+    # monitoring
+    recent_reward = deque(maxlen=20)
+
+    # environment
+    env = LinEnv()
+    train_buff = gather_seed_episodes(env, args.seed_episodes)
+    test_buff = gather_seed_episodes(env, args.seed_episodes)
+    episode = args.seed_episodes
 
     # policies here
     policy = Policy()
@@ -149,6 +156,7 @@ def main(args):
                     predicted_reward = R(trajectory.state)
                     loss = (((trajectory.reward - predicted_reward) * trajectory.mask) ** 2).mean()
                     pbar.update_test_loss_and_save_model(loss)
+            pbar.close()
 
             # Terminal state learning
             train, test = SDDataset(train_buff), SDDataset(test_buff)
@@ -174,12 +182,50 @@ def main(args):
                     loss = F.binary_cross_entropy_with_logits(predicted_done, done)
                     pbar.update_test_loss_and_save_model(loss)
 
+            pbar.close()
+
             # Behaviour learning
-            
+            train = ConcatDataset([SARDataset(train_buff), SARDataset(test_buff)])
+            train = DataLoader(train, batch_size=args.batch_size, collate_fn=pad_collate_2, shuffle=True)
+            pbar = Pbar(items_to_process=args.trajectories_per_pass, train_len=len(train),
+                        batch_size=args.batch_size, label='behavior')
+
+            while pbar.items_processed < 10:
+                for trajectory in train:
+                    policy_optim.zero_grad(), T_optim.zero_grad(), R_optim.zero_grad(), D_optim.zero_grad()
+                    imagine = [torch.cat((trajectory.state, trajectory.action.unsqueeze(2)), dim=2)]
+                    reward = [R(trajectory.state)]
+                    done = [D(trajectory.state)]
+                    for tau in range(args.horizon):
+                        state, (h, c) = T(imagine[tau])
+                        action = policy(state).rsample()
+                        reward += [R(state)]
+                        done += [D(state)]
+                        imagine += [torch.cat((state, action), dim=2)]
+
+                    VR = torch.sum(torch.stack(reward), dim=0)
+                    loss = - VR.mean()
+                    loss.backward()
+                    policy_optim.step()
+                    pbar.update_train_loss_and_checkpoint(loss, models={'policy': policy}, optimizer=policy_optim)
 
             pbar.close()
 
-        converged = True
+            with torch.no_grad():
+                recent_reward.append(0)
+                # gather new experience
+                state, reward, done = env.reset(), 0.0, False
+                action = policy(prepro(state)).rsample().squeeze()
+                train_buff.append(episode, state, action.cpu().numpy(), reward, done, None)
+                recent_reward[-1] += reward
+                while not done:
+                    state, reward, done = env.step(action.squeeze(0).cpu().numpy())
+                    action = policy(prepro(state)).rsample().squeeze()
+                    train_buff.append(episode, state, action.cpu().numpy(), reward, done, None)
+                    recent_reward[-1] += reward
+                print(f'RECENT REWARD: {mean(recent_reward)}')
+                episode += 1
+        converged = False
 
 
 
@@ -189,7 +235,8 @@ if __name__ == '__main__':
             'collect_interval': 30,
             'batch_size': 1,
             'trajectories_per_pass': 10,
-            'device': 'cuda:0'
+            'device': 'cuda:0',
+            'horizon': 10
             }
 
     wandb.init(config=args)
