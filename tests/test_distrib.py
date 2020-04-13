@@ -3,7 +3,7 @@ from wm2.distributions import TanhTransformedGaussian
 import torch
 
 def test_tanh_transform():
-    dist = TanhTransformedGaussian(0.0, 0.8)
+    dist = TanhTransformedGaussian(0.0, 0.5)
     samples = dist.sample(sample_shape=(1000,))
     plt.hist(samples.numpy(), bins=50)
     plt.show()
