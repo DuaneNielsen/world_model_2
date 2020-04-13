@@ -250,12 +250,15 @@ def main(args):
                         v += [value(state)]
                         imagine += [torch.cat((state, action), dim=2)]
 
-                    #VR = torch.sum(torch.stack(reward), dim=0)
-
-                    n = torch.linspace(1.0, args.horizon + 1, args.horizon + 1)
-                    discount = torch.empty_like(n).fill_(args.discount).pow(n).view(-1, 1, 1, 1)
+                    #VR = torch.mean(torch.stack(reward), dim=0)
                     rstack, vstack = torch.stack(reward), torch.stack(v)
-                    VN = torch.cat((rstack[:-1], vstack[-1:])) * discount
+                    n = torch.linspace(0.0, args.horizon, args.horizon + 1)
+                    discount = torch.empty_like(n).fill_(args.discount).pow(n).view(-1, 1, 1, 1)
+                    k = 10
+                    r_mask = torch.cat((torch.ones(k), torch.zeros(args.horizon + 1 - k))).view(-1, 1, 1, 1)
+                    v_mask = torch.zeros(args.horizon+1).view(-1, 1, 1, 1)
+                    v_mask[k] = 1.0
+                    VN = (vstack * v_mask + rstack * r_mask) * discount
 
                     policy_optim.zero_grad(), value_optim.zero_grad()
                     T_optim.zero_grad(), R_optim.zero_grad(), D_optim.zero_grad()
