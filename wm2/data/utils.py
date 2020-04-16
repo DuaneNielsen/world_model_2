@@ -9,7 +9,7 @@ class SARI:
     def __init__(self, state, action, reward, done, info):
         self.state = state
         self.action = action
-        self.reward = np.array([reward], dtype=state.dtype)
+        self.reward = reward
         self.has_reward = reward != 0
         self.done = done
         self.info = info
@@ -58,6 +58,17 @@ def pad_collate(batch):
         data[key] = torch.from_numpy(batch[0][key]).unsqueeze(0)
     return TensorNamespace(**data)
 
+# def pad_collate_2(batch):
+#     """
+#     returns batch in [T, B, D] format (timesteps, Batch, dimensions)
+#     :param batch:
+#     :return:
+#     """
+#     data = {}
+#     for key in batch[0]:
+#         data[key] = torch.from_numpy(batch[0][key]).unsqueeze(1)
+#     return TensorNamespace(**data)
+
 
 def pad_collate_2(batch):
     """
@@ -67,8 +78,14 @@ def pad_collate_2(batch):
     """
     data = {}
     for key in batch[0]:
-        data[key] = torch.from_numpy(batch[0][key]).unsqueeze(1)
+        data[key] = []
+    for element in batch:
+        for key in element:
+                data[key] += [torch.from_numpy(element[key])]
+    for key in data:
+        data[key] = torch.stack(data[key]).permute(1, 0, 2)
     return TensorNamespace(**data)
+
 
 
 def autoregress(state, action, reward, mask, target_start=0, target_length=None, advance=1):

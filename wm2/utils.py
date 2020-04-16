@@ -36,7 +36,7 @@ class Pbar:
         self.bar = tqdm(total=items_to_process)
         self.items_processed = 0
         self.label = label
-        depth = train_depth if train_depth is not None else min(train_len//batch_size, 10)
+        depth = train_depth if train_depth is not None else min((train_len//batch_size) + 1, 10)
         self.loss_move_ave = deque(maxlen=depth)
         self.test = []
         self.test_loss = 0.0

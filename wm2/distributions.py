@@ -1,7 +1,7 @@
 import math
 from torch.nn.functional import softplus
 from torch.distributions import constraints, TransformedDistribution, Normal
-from torch.distributions.transforms import Transform
+from torch.distributions.transforms import Transform, AffineTransform
 
 
 class TanhTransform(Transform):
@@ -47,6 +47,28 @@ class TanhTransformedGaussian(TransformedDistribution):
         base_dist = Normal(mu, scale)
         transforms = [TanhTransform(cache_size=1)]
         super(TanhTransformedGaussian, self).__init__(base_dist, transforms)
+
+    @property
+    def mean(self):
+        return self.mu
+
+    @property
+    def variance(self):
+        return None
+
+    def enumerate_support(self, expand=True):
+        pass
+
+    def entropy(self):
+        pass
+
+
+class ScaledTanhTransformedGaussian(TransformedDistribution):
+    def __init__(self, mu, scale, min=-1.0, max=1.0):
+        self.mu, self.scale = mu, scale
+        base_dist = Normal(mu, scale)
+        transforms = [TanhTransform(cache_size=1), AffineTransform(loc=0, scale=(max - min)/2)]
+        super().__init__(base_dist, transforms)
 
     @property
     def mean(self):
