@@ -242,6 +242,8 @@ def main(args):
                     reward = [R(trajectory.state)]
                     done = [D(trajectory.state)]
                     v = [value(trajectory.state)]
+
+                    # imagine forward here
                     for tau in range(args.horizon):
                         state, (h, c) = T(imagine[tau])
                         action = policy(state).rsample()
@@ -252,24 +254,74 @@ def main(args):
 
                     #VR = torch.mean(torch.stack(reward), dim=0)
                     rstack, vstack = torch.stack(reward), torch.stack(v)
-                    n = torch.linspace(0.0, args.horizon, args.horizon + 1)
-                    discount = torch.empty_like(n).fill_(args.discount).pow(n).view(-1, 1, 1, 1)
-                    k = 10
-                    r_mask = torch.cat((torch.ones(k), torch.zeros(args.horizon + 1 - k))).view(-1, 1, 1, 1)
-                    v_mask = torch.zeros(args.horizon+1).view(-1, 1, 1, 1)
-                    v_mask[k] = 1.0
-                    VN = (vstack * v_mask + rstack * r_mask) * discount
+                    H, L, N, S = rstack.shape
+
+                    """ construct matrix in form
+                    
+                    R0 V1  0  0
+                    R0 R1 V2  0
+                    R0 R1 R2 V3
+                    
+                    Where R0, R1, R2 are predicted rewards at timesteps 0, 1, 2
+                    and V1, V2, V3 are the predicted future values of states at time 1, 2, 3
+                    """
+
+                    # create a H * H matrix filled with rewards (using rstack preserves computation graph)
+                    rstack = rstack.repeat(H, 1, 1, 1).reshape(H, H, L, N, S)
+
+                    # replace the upper triangle with zeros
+                    r, c = torch.triu_indices(H, H)
+                    rstack[r, c] = 0.0
+
+                    # replace diagonal rewards with values
+                    rstack[torch.arange(H), torch.arange(H)] = vstack[torch.arange(H)]
+
+                    # clip the top row
+                    rstack = rstack[1:, :]
+
+                    """ reduce the above matrix to values using the formula from the paper in 2 steps
+                    first, compute VN for each k by applying discounts to each time-step and compute the expected value
+                    """
+
+                    # compute and apply the discount (alternatively can estimate the discount using a probability to terminate function)
+                    n = torch.linspace(0.0, H - 1, H)
+                    discount = torch.full_like(n, args.discount).pow(n).view(1, -1, 1, 1, 1)
+                    rstack = rstack * discount
+
+                    # compute the expectation
+                    steps = torch.linspace(2, H, H - 1).view(-1, 1, 1, 1)
+                    VNK = rstack.sum(dim=1) / steps
+
+                    """ now we are left with a single column matrix in form
+                    VN(k=1)
+                    VN(k=2)
+                    VN(k=3)
+                    
+                    combine these into a single value with the V lambda equation
+                    
+                    VL = (1-lambda) * lambda ^ 0  * VN(k=1) + (1 - lambda) * lambda ^ 1 VN(k=2) + lambda ^ 2 * VN(k=3)
+                    
+                    Note the lambda terms should sum to 1, or you're doing it wrong
+                    """
+
+                    lam = torch.full((VNK.size(0),), args.lam).pow(torch.arange(VNK.size(0))).view(-1, 1, 1, 1)
+                    lam[0:-1] = lam[0:-1] * (1 - args.lam)
+                    VL = (VNK * lam).sum(0)
 
                     policy_optim.zero_grad(), value_optim.zero_grad()
                     T_optim.zero_grad(), R_optim.zero_grad(), D_optim.zero_grad()
                     # policy_loss = - VR.mean()
-                    policy_loss = -VN.mean()
-                    policy_loss.backward(retain_graph=True)
+                    policy_loss = -VL.mean()
+                    policy_loss.backward()
                     policy_optim.step()
 
+                    # regress against tau ie: the initial estimated value...
                     policy_optim.zero_grad(), value_optim.zero_grad()
                     T_optim.zero_grad(), R_optim.zero_grad(), D_optim.zero_grad()
-                    value_loss = ((VN - vstack) ** 2).mean() / 2
+
+                    VN = VL.detach().reshape(L*N, S)
+                    values = value(trajectory.state.reshape(L*N, S))
+                    value_loss = ((VN - values) ** 2).mean() / 2
                     value_loss.backward()
                     value_optim.step()
 
@@ -335,6 +387,7 @@ if __name__ == '__main__':
             'device': 'cuda:0',
             'horizon': 10,
             'discount': 0.99,
+            'lam': 0.95,
             'lr': 1e-3
             }
 
