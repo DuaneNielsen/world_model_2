@@ -15,7 +15,7 @@ import gym
 import matplotlib
 import matplotlib.pyplot as plt
 
-from distributions import TanhTransformedGaussian
+from distributions import TanhTransformedGaussian, ScaledTanhTransformedGaussian
 from wm2.data.datasets import Buffer, SARDataset, SARNextDataset, SDDataset
 from wm2.utils import Pbar
 from data.utils import pad_collate_2
@@ -99,14 +99,16 @@ def gather_seed_episodes(env, seed_episodes):
 
 
 class Policy(nn.Module):
-    def __init__(self, state_dims, hidden_dims):
+    def __init__(self, state_dims, hidden_dims, min=-1.0, max=1.0):
         super().__init__()
         self.mu = nn.Sequential(nn.Linear(state_dims, hidden_dims), nn.ReLU(), nn.Linear(hidden_dims, 1, bias=False))
         self.scale = nn.Linear(state_dims, 1, bias=False)
+        self.min = min
+        self.max = max
 
     def forward(self, state):
         mu, scale = self.mu(state), torch.sigmoid(self.scale(state))
-        return TanhTransformedGaussian(mu, 0.2)
+        return ScaledTanhTransformedGaussian(mu, 0.2, min=self.min, max=self.max)
 
 
 class MLP(nn.Module):
@@ -164,6 +166,7 @@ def main(args):
     # environment
     #env = LinEnv()
     env = gym.make('Pendulum-v0')
+    #env = gym.make('MountainCarContinuous-v0')
     train_buff = gather_seed_episodes(env, args.seed_episodes)
     test_buff = gather_seed_episodes(env, args.seed_episodes)
     train_episode, test_episode = args.seed_episodes, args.seed_episodes
@@ -173,11 +176,10 @@ def main(args):
     action_dims = 1
 
     # policy model
-    policy = Policy(state_dims=state_dims, hidden_dims=32).to(args.device)
+    policy = Policy(state_dims=state_dims, hidden_dims=32, min=-2.0, max=2.0).to(args.device)
     # policy.mu.weight.data[0] = -0.1
     # policy.mu.bias.data[0] = -0.5
     policy_optim = Adam(policy.parameters(), lr=args.lr)
-
 
     # value model
     #value = nn.Linear(state_dims, 1)
