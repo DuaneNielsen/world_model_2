@@ -92,12 +92,30 @@ def pad_collate_2(batch):
     :param batch:
     :return:
     """
-    data = {}
+    lengths = [trajectory['state'].shape[0] for trajectory in batch]
+    longest = max(lengths)
+    data = {'pad': []}
+    shape = {}
+    dtype = {}
+
+    # initialize parameters
     for key in batch[0]:
         data[key] = []
-    for element in batch:
+        shape[key] = batch[0][key].shape[1]
+        dtype[key] = batch[0][key].dtype
+
+    for i, element in enumerate(batch):
+        data['pad'] += [np.concatenate((np.ones(lengths[i], dtype=np.float32), np.zeros(longest-lengths[i], dtype=np.float32)))]
+        for key in element:
+            padding = np.zeros((longest - lengths[i], shape[key]), dtype=dtype[key])
+            element[key] += np.concatenate((element[key], padding), axis=0)
+
+    # populate the sequences from the batch
+    for i, element in enumerate(batch):
+        data['pad'][i] = torch.from_numpy(data['pad'][i]).view(-1, 1)
         for key in element:
                 data[key] += [torch.from_numpy(element[key])]
+
     for key in data:
         data[key] = torch.stack(data[key]).permute(1, 0, 2)
     return TensorNamespace(**data)

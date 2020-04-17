@@ -166,7 +166,7 @@ def main(args):
     # environment
     #env = LinEnv()
     env = gym.make('Pendulum-v0')
-    #env = gym.make('MountainCarContinuous-v0')
+    # env = gym.make('MountainCarContinuous-v0')
     train_buff = gather_seed_episodes(env, args.seed_episodes)
     test_buff = gather_seed_episodes(env, args.seed_episodes)
     train_episode, test_episode = args.seed_episodes, args.seed_episodes
