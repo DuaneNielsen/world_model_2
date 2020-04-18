@@ -1,7 +1,8 @@
 from types import SimpleNamespace
-from collections import deque
+from collections import deque, OrderedDict
 from statistics import mean
 from random import random
+import curses
 
 import torch
 import torch.nn as nn
@@ -143,7 +144,68 @@ def reward_mask_f(state, reward, action):
     return nonzero[:, np.newaxis]
 
 
+class Curses():
+    def __init__(self):
+        # curses
+        self.stdscr = curses.initscr()
+
+        # Clear and refresh the screen for a blank canvas
+        self.stdscr.clear()
+        self.stdscr.refresh()
+
+        curses.start_color()
+        curses.use_default_colors()
+        # Start colors in curses
+
+        # loss text color
+        curses.init_pair(1, 0, -1)
+
+        #status bar color
+        curses.init_pair(2, 139, -1)
+
+        self.height, self.width = self.stdscr.getmaxyx()
+
+        self.bar = OrderedDict()
+
+    def clear(self):
+        # curses
+        self.stdscr.clear()
+        self.height, self.width = self.stdscr.getmaxyx()
+
+    def refresh(self):
+        self.stdscr.refresh()
+
+    def update_slot(self, label, string):
+        self.bar[label] = string
+        slot = list(self.bar).index(label)
+        try:
+            self.stdscr.attron(curses.color_pair(1))
+            self.stdscr.addstr(self.height - slot - 2, 0, self.bar[label])
+            self.stdscr.addstr(self.height - slot - 2, len(self.bar[label]),
+                               " " * (self.width - len(self.bar[label]) - 1))
+            self.stdscr.attroff(curses.color_pair(1))
+            self.stdscr.refresh()
+        except curses.error:
+            pass
+
+    def update_status(self, steps):
+        try:
+            bar = '#' * steps
+            self.stdscr.attron(curses.color_pair(2))
+            self.stdscr.addstr(self.height - 1, 0, bar)
+            self.stdscr.addstr(self.height - 1, len(bar),
+                               " " * (self.width - len(bar) - 1))
+            self.stdscr.attroff(curses.color_pair(2))
+            self.stdscr.refresh()
+        except curses.error:
+            pass
+
+
 def main(args):
+
+    # curses
+    scr = Curses()
+
     # monitoring
     recent_reward = deque(maxlen=20)
 
@@ -192,7 +254,7 @@ def main(args):
     T_optim = Adam(T.parameters(), lr=args.lr)
 
     # reward model
-    R = MLP(state_dims, 32, 1).to(args.device)
+    R = MLP(state_dims, 128, 1).to(args.device)
     #R = nn.Linear(state_dims, 1)
     R_optim = Adam(R.parameters(), lr=args.lr)
 
@@ -202,58 +264,71 @@ def main(args):
 
     converged = False
 
+    scr.clear()
+
     while not converged:
+
         for c in range(args.collect_interval):
+
+            scr.update_status(c)
 
             # Dynamics learning
             train, test = SARNextDataset(train_buff, mask_f=None), SARNextDataset(test_buff, mask_f=None)
             train = DataLoader(train, batch_size=args.batch_size, collate_fn=pad_collate_2, shuffle=True)
             test = DataLoader(test, batch_size=args.batch_size, collate_fn=pad_collate_2, shuffle=True)
-            pbar = Pbar(items_to_process=args.trajectories_per_pass, train_len=len(train), batch_size=args.batch_size,
-                        label='transition')
-            while pbar.items_processed < args.trajectories_per_pass:
+            # pbar = Pbar(items_to_process=args.trajectories_per_pass, train_len=len(train), batch_size=args.batch_size,
+            #             label='transition')
+            #while pbar.items_processed < args.trajectories_per_pass:
+
+            for _ in range(1):
 
                 # train transition model
                 for trajectory in train:
                     input = torch.cat((trajectory.state, trajectory.action), dim=2).to(args.device)
                     T_optim.zero_grad()
                     predicted_state, (h, c) = T(input)
-                    loss = ((trajectory.next_state.to(args.device) - predicted_state) ** 2).mean()
+                    loss = ((trajectory.next_state.to(args.device) - predicted_state) ** 2) * trajectory.pad.to(args.device)
+                    loss = loss.mean()
                     loss.backward()
                     T_optim.step()
-                    pbar.update_train_loss_and_checkpoint(loss, models={'transition': T}, optimizer=T_optim)
+                    scr.update_slot('transition_train', f'Transition training loss {loss.item()}')
+                    #pbar.update_train_loss_and_checkpoint(loss, models={'transition': T}, optimizer=T_optim)
 
                 for trajectory in test:
                     input = torch.cat((trajectory.state, trajectory.action), dim=2).to(args.device)
                     predicted_state, (h, c) = T(input)
-                    loss = ((trajectory.next_state.to(args.device) - predicted_state) ** 2).mean()
-                    pbar.update_test_loss_and_save_model(loss, models={'transition': T})
-            pbar.close()
+                    loss = ((trajectory.next_state.to(args.device) - predicted_state) ** 2) * trajectory.pad.to(args.device)
+                    loss = loss.mean()
+                    scr.update_slot('transition_test', f'Transition test loss  {loss.item()}')
+                    #pbar.update_test_loss_and_save_model(loss, models={'transition': T})
+            #pbar.close()
 
             # Reward learning
             #train, test = SARDataset(train_buff, mask_f=reward_mask_f), SARDataset(test_buff, mask_f=reward_mask_f)
             train, test = SARDataset(train_buff), SARDataset(test_buff)
             train = DataLoader(train, batch_size=args.batch_size, collate_fn=pad_collate_2, shuffle=True)
             test = DataLoader(test, batch_size=args.batch_size, collate_fn=pad_collate_2, shuffle=True)
-            pbar = Pbar(items_to_process=args.trajectories_per_pass, train_len=len(train),
-                        batch_size=args.batch_size, label='reward')
-            while pbar.items_processed < args.trajectories_per_pass:
-
+            # pbar = Pbar(items_to_process=args.trajectories_per_pass, train_len=len(train),
+            #             batch_size=args.batch_size, label='reward')
+            #while pbar.items_processed < args.trajectories_per_pass:
+            for _ in range(1):
                 for trajectory in train:
                     R_optim.zero_grad()
                     predicted_reward = R(trajectory.state.to(args.device))
-                    #loss = (((trajectory.reward - predicted_reward) * trajectory.mask) ** 2).mean()
-                    loss = ((trajectory.reward.to(args.device) - predicted_reward) ** 2).mean()
+                    loss = (((trajectory.reward.to(args.device) - predicted_reward) * trajectory.pad.to(args.device)) ** 2).mean()
+                    #loss = ((trajectory.reward.to(args.device) - predicted_reward) ** 2).mean()
                     loss.backward()
                     R_optim.step()
-                    pbar.update_train_loss_and_checkpoint(loss)
+                    scr.update_slot('reward_train', f'Reward train loss {loss.item()}')
+                    #pbar.update_train_loss_and_checkpoint(loss)
 
                 for trajectory in test:
                     predicted_reward = R(trajectory.state.to(args.device))
-                    #loss = (((trajectory.reward - predicted_reward) * trajectory.mask) ** 2).mean()
-                    loss = ((trajectory.reward.to(args.device) - predicted_reward) ** 2).mean()
-                    pbar.update_test_loss_and_save_model(loss)
-            pbar.close()
+                    loss = (((trajectory.reward.to(args.device) - predicted_reward) * trajectory.pad.to(args.device)) ** 2).mean()
+                    scr.update_slot('reward_test', f'Reward test loss  {loss.item()}')
+                    #loss = ((trajectory.reward.to(args.device) - predicted_reward) ** 2).mean()
+                    #pbar.update_test_loss_and_save_model(loss)
+            #pbar.close()
 
             # Terminal state learning
             # train, test = SDDataset(train_buff), SDDataset(test_buff)
@@ -284,14 +359,15 @@ def main(args):
             # Behaviour learning
             train = ConcatDataset([SARDataset(train_buff), SARDataset(test_buff)])
             train = DataLoader(train, batch_size=args.batch_size, collate_fn=pad_collate_2, shuffle=True)
-            pbar = Pbar(items_to_process=args.trajectories_per_pass, train_len=len(train),
-                        batch_size=args.batch_size, label='behavior')
+            # pbar = Pbar(items_to_process=args.trajectories_per_pass, train_len=len(train),
+            #             batch_size=args.batch_size, label='behavior')
 
-            while pbar.items_processed < 10:
+            #while pbar.items_processed < 10:
+            for _ in range(1):
                 for trajectory in train:
                     imagine = [torch.cat((trajectory.state, trajectory.action), dim=2).to(args.device)]
                     reward = [R(trajectory.state.to(args.device))]
-                    done = [D(trajectory.state.to(args.device))]
+                    #done = [D(trajectory.state.to(args.device))]
                     v = [value(trajectory.state.to(args.device))]
 
                     # imagine forward here
@@ -299,7 +375,7 @@ def main(args):
                         state, (h, c) = T(imagine[tau])
                         action = policy(state).rsample()
                         reward += [R(state)]
-                        done += [D(state)]
+                        #done += [D(state)]
                         v += [value(state)]
                         imagine += [torch.cat((state, action), dim=2)]
 
@@ -365,6 +441,7 @@ def main(args):
                     policy_loss = -VL.mean()
                     policy_loss.backward()
                     policy_optim.step()
+                    scr.update_slot('policy_loss', f'Policy loss  {policy_loss.item()}')
 
                     # regress against tau ie: the initial estimated value...
                     policy_optim.zero_grad(), value_optim.zero_grad()
@@ -375,17 +452,24 @@ def main(args):
                     value_loss = ((VN - values) ** 2).mean() / 2
                     value_loss.backward()
                     value_optim.step()
+                    scr.update_slot('value_loss', f'Value loss  {value_loss.item()}')
 
-                    pbar.update_train_loss_and_checkpoint(policy_loss, models={'policy': policy},
-                                                          optimizer=policy_optim)
+                    #pbar.update_train_loss_and_checkpoint(policy_loss, models={'policy': policy},
+                    #                                                          optimizer=policy_optim)
 
-            pbar.close()
+            #pbar.close()
 
-        train_buf, reward = gather_experience(train_buff, train_episode, env, policy,
-                                              eps=eps, eps_policy=random_policy)
-        recent_reward.append(reward)
-        print('')
-        print(f'RECENT REWARD: {mean(recent_reward)} EPS: {eps}')
+        for _ in range(5):
+            train_buf, reward = gather_experience(train_buff, train_episode, env, policy,
+                                                  eps=eps, eps_policy=random_policy)
+            train_episode += 1
+
+            recent_reward.append(reward)
+            scr.update_slot('eps', f'EPS: {eps}')
+            rr = ''
+            for reward in recent_reward:
+                rr += f' {reward:.5f},'
+            scr.update_slot('recent_rewards', 'Recent rewards: ' + rr)
 
         # a = policy.mu(s)
         # r = R(s)
@@ -413,9 +497,8 @@ def main(args):
         #
         # fig.canvas.draw()
 
-        print(recent_reward)
-        train_episode += 1
-        if random() < 0.1:
+
+        if random() < 1.1:
             test_buff, reward = gather_experience(test_buff, test_episode, env, policy,
                                                   eps=eps, eps_policy=random_policy)
 
@@ -431,12 +514,12 @@ def main(args):
 
 
 if __name__ == '__main__':
-    args = {'seed_episodes': 20,
-            'collect_interval': 30,
+    args = {'seed_episodes': 40,
+            'collect_interval': 10,
             'batch_size': 8,
             'trajectories_per_pass': 40,
             'device': 'cuda:0',
-            'horizon': 10,
+            'horizon': 15,
             'discount': 0.99,
             'lam': 0.95,
             'lr': 1e-3
@@ -445,4 +528,4 @@ if __name__ == '__main__':
     wandb.init(config=args)
     args = SimpleNamespace(**args)
 
-    main(args)
+    curses.wrapper(main(args))
