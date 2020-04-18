@@ -144,31 +144,26 @@ def reward_mask_f(state, reward, action):
     return nonzero[:, np.newaxis]
 
 
-class Curses():
+class Curses:
     def __init__(self):
-        # curses
         self.stdscr = curses.initscr()
 
         # Clear and refresh the screen for a blank canvas
         self.stdscr.clear()
         self.stdscr.refresh()
 
+        # Start colors in curses
         curses.start_color()
         curses.use_default_colors()
-        # Start colors in curses
 
-        # loss text color
-        curses.init_pair(1, 0, -1)
-
-        #status bar color
-        curses.init_pair(2, 139, -1)
+        curses.init_pair(1, 0, -1)  # slot text color
+        curses.init_pair(2, 139, -1)  # status bar color
 
         self.height, self.width = self.stdscr.getmaxyx()
 
         self.bar = OrderedDict()
 
     def clear(self):
-        # curses
         self.stdscr.clear()
         self.height, self.width = self.stdscr.getmaxyx()
 
@@ -188,9 +183,9 @@ class Curses():
         except curses.error:
             pass
 
-    def update_status(self, steps):
+    def update_progressbar(self, tics):
         try:
-            bar = '#' * steps
+            bar = '#' * tics
             self.stdscr.attron(curses.color_pair(2))
             self.stdscr.addstr(self.height - 1, 0, bar)
             self.stdscr.addstr(self.height - 1, len(bar),
@@ -208,6 +203,7 @@ def main(args):
 
     # monitoring
     recent_reward = deque(maxlen=20)
+    wandb.gym.monitor()
 
     # visualization
     # plt.ion()
@@ -239,8 +235,6 @@ def main(args):
 
     # policy model
     policy = Policy(state_dims=state_dims, hidden_dims=32, min=-2.0, max=2.0).to(args.device)
-    # policy.mu.weight.data[0] = -0.1
-    # policy.mu.bias.data[0] = -0.5
     policy_optim = Adam(policy.parameters(), lr=args.lr)
 
     # value model
@@ -270,7 +264,8 @@ def main(args):
 
         for c in range(args.collect_interval):
 
-            scr.update_status(c)
+            scr.update_progressbar(c)
+            scr.update_slot('wandb', f'{wandb.run.name} {wandb.run.project} {wandb.run.id}')
 
             # Dynamics learning
             train, test = SARNextDataset(train_buff, mask_f=None), SARNextDataset(test_buff, mask_f=None)
@@ -292,6 +287,7 @@ def main(args):
                     loss.backward()
                     T_optim.step()
                     scr.update_slot('transition_train', f'Transition training loss {loss.item()}')
+                    wandb.log({'transition_train': loss.item()})
                     #pbar.update_train_loss_and_checkpoint(loss, models={'transition': T}, optimizer=T_optim)
 
                 for trajectory in test:
@@ -300,6 +296,7 @@ def main(args):
                     loss = ((trajectory.next_state.to(args.device) - predicted_state) ** 2) * trajectory.pad.to(args.device)
                     loss = loss.mean()
                     scr.update_slot('transition_test', f'Transition test loss  {loss.item()}')
+                    wandb.log({'transition_test': loss.item()})
                     #pbar.update_test_loss_and_save_model(loss, models={'transition': T})
             #pbar.close()
 
@@ -320,12 +317,14 @@ def main(args):
                     loss.backward()
                     R_optim.step()
                     scr.update_slot('reward_train', f'Reward train loss {loss.item()}')
+                    wandb.log({'reward_train': loss.item()})
                     #pbar.update_train_loss_and_checkpoint(loss)
 
                 for trajectory in test:
                     predicted_reward = R(trajectory.state.to(args.device))
                     loss = (((trajectory.reward.to(args.device) - predicted_reward) * trajectory.pad.to(args.device)) ** 2).mean()
                     scr.update_slot('reward_test', f'Reward test loss  {loss.item()}')
+                    wandb.log({'reward_test': loss.item()})
                     #loss = ((trajectory.reward.to(args.device) - predicted_reward) ** 2).mean()
                     #pbar.update_test_loss_and_save_model(loss)
             #pbar.close()
@@ -357,7 +356,7 @@ def main(args):
             # pbar.close()
 
             # Behaviour learning
-            train = ConcatDataset([SARDataset(train_buff), SARDataset(test_buff)])
+            train = ConcatDataset([SARDataset(train_buff)])
             train = DataLoader(train, batch_size=args.batch_size, collate_fn=pad_collate_2, shuffle=True)
             # pbar = Pbar(items_to_process=args.trajectories_per_pass, train_len=len(train),
             #             batch_size=args.batch_size, label='behavior')
@@ -442,6 +441,7 @@ def main(args):
                     policy_loss.backward()
                     policy_optim.step()
                     scr.update_slot('policy_loss', f'Policy loss  {policy_loss.item()}')
+                    wandb.log({'policy_loss': policy_loss.item()})
 
                     # regress against tau ie: the initial estimated value...
                     policy_optim.zero_grad(), value_optim.zero_grad()
@@ -453,6 +453,7 @@ def main(args):
                     value_loss.backward()
                     value_optim.step()
                     scr.update_slot('value_loss', f'Value loss  {value_loss.item()}')
+                    wandb.log({'value_loss': policy_loss.item()})
 
                     #pbar.update_train_loss_and_checkpoint(policy_loss, models={'policy': policy},
                     #                                                          optimizer=policy_optim)
@@ -463,6 +464,8 @@ def main(args):
             train_buf, reward = gather_experience(train_buff, train_episode, env, policy,
                                                   eps=eps, eps_policy=random_policy)
             train_episode += 1
+
+            wandb.log({'reward': reward})
 
             recent_reward.append(reward)
             scr.update_slot('eps', f'EPS: {eps}')
@@ -501,7 +504,6 @@ def main(args):
         if random() < 1.1:
             test_buff, reward = gather_experience(test_buff, test_episode, env, policy,
                                                   eps=eps, eps_policy=random_policy)
-
             test_episode += 1
 
         # boost or decrease exploration if no reward
@@ -517,7 +519,6 @@ if __name__ == '__main__':
     args = {'seed_episodes': 40,
             'collect_interval': 10,
             'batch_size': 8,
-            'trajectories_per_pass': 40,
             'device': 'cuda:0',
             'horizon': 15,
             'discount': 0.99,
