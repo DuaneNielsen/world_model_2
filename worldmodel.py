@@ -20,6 +20,7 @@ from distributions import TanhTransformedGaussian, ScaledTanhTransformedGaussian
 from wm2.data.datasets import Buffer, SARDataset, SARNextDataset, SDDataset
 from wm2.utils import Pbar
 from data.utils import pad_collate_2
+import wm2.utils
 
 
 class LinEnv:
@@ -81,6 +82,7 @@ def gather_experience(buff, episode, env, policy, eps=0.0, eps_policy=None, rend
             env.render()
         while not done:
             state, reward, done, info = env.step(action)
+            episode_reward += reward
             if random() >= eps:
                 action = policy(policy_prepro(state).unsqueeze(0)).rsample()
             else:
@@ -89,7 +91,7 @@ def gather_experience(buff, episode, env, policy, eps=0.0, eps_policy=None, rend
             buff.append(episode, buffer_prepro(state), action, reward_prepro(reward), done, None)
             if render:
                 env.render()
-    return buff, reward
+    return buff, episode_reward
 
 
 def gather_seed_episodes(env, seed_episodes):
@@ -188,12 +190,24 @@ class Curses:
             bar = '#' * tics
             self.stdscr.attron(curses.color_pair(2))
             self.stdscr.addstr(self.height - 1, 0, bar)
-            self.stdscr.addstr(self.height - 1, len(bar),
-                               " " * (self.width - len(bar) - 1))
+            self.stdscr.addstr(self.height - 1, len(bar)," " * (self.width - len(bar) - 1))
             self.stdscr.attroff(curses.color_pair(2))
             self.stdscr.refresh()
         except curses.error:
             pass
+
+    def _write_row(self, str, h=0, w=0, color_pair=0):
+        self.stdscr.attron(curses.color_pair(color_pair))
+        self.stdscr.addstr(h, 0, str)
+        self.stdscr.addstr(h, len(str), " " * (self.width - len(str) - 1))
+        self.stdscr.attroff(curses.color_pair(color_pair))
+
+    def update_table(self, table):
+        assert len(table.shape) == 2
+        for i in range(table.shape[0]):
+            table_str = np.array2string(table[i], max_line_width=self.width)
+            self._write_row(table_str, i)
+        self.stdscr.refresh()
 
 
 def main(args):
@@ -204,6 +218,7 @@ def main(args):
     # monitoring
     recent_reward = deque(maxlen=20)
     wandb.gym.monitor()
+    rstack_cooldown = wm2.utils.Cooldown(secs=30)
 
     # visualization
     # plt.ion()
@@ -404,6 +419,13 @@ def main(args):
 
                     # clip the top row
                     rstack = rstack[1:, :]
+                    if rstack_cooldown():
+                        scr.update_slot('cooldown', str(rstack_cooldown.last_cooldown))
+                        snapshot = rstack[:, :, 0, 0, 0].detach().cpu().numpy()
+                        scr.update_table(snapshot)
+
+                        #t = wandb.Table(data=)
+                        #wandb.log({'imagination': t})
 
                     """ reduce the above matrix to values using the formula from the paper in 2 steps
                     first, compute VN for each k by applying discounts to each time-step and compute the expected value
@@ -453,7 +475,7 @@ def main(args):
                     value_loss.backward()
                     value_optim.step()
                     scr.update_slot('value_loss', f'Value loss  {value_loss.item()}')
-                    wandb.log({'value_loss': policy_loss.item()})
+                    wandb.log({'value_loss': value_loss.item()})
 
                     #pbar.update_train_loss_and_checkpoint(policy_loss, models={'policy': policy},
                     #                                                          optimizer=policy_optim)
