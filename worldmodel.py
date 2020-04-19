@@ -101,26 +101,35 @@ def gather_seed_episodes(env, seed_episodes):
     return buff
 
 
-class Policy(nn.Module):
-    def __init__(self, state_dims, hidden_dims, min=-1.0, max=1.0):
+class MLP(nn.Module):
+    def __init__(self, layers):
         super().__init__()
-        self.mu = nn.Sequential(nn.Linear(state_dims, hidden_dims), nn.ReLU(), nn.Linear(hidden_dims, 1, bias=False))
-        self.scale = nn.Linear(state_dims, 1, bias=False)
+        in_dims = layers[0]
+        net = []
+        for hidden in layers[1:-1]:
+            net += [nn.Linear(in_dims, hidden)]
+            net += [nn.ELU()]
+            in_dims = hidden
+        net += [nn.Linear(in_dims, layers[-1], bias=False)]
+
+        self.mlp = nn.Sequential(*net)
+
+    def forward(self, inp):
+        return self.mlp(inp)
+
+
+class Policy(nn.Module):
+    def __init__(self, layers, min=-1.0, max=1.0):
+        super().__init__()
+        self.mu = MLP(layers)
+        #self.scale = nn.Linear(state_dims, 1, bias=False)
         self.min = min
         self.max = max
 
     def forward(self, state):
-        mu, scale = self.mu(state), torch.sigmoid(self.scale(state))
+        mu = self.mu(state)
+        #scale = torch.sigmoid(self.scale(state))
         return ScaledTanhTransformedGaussian(mu, 0.2, min=self.min, max=self.max)
-
-
-class MLP(nn.Module):
-    def __init__(self, input_dim, hidden_dim, output_dim):
-        super().__init__()
-        self.mlp = nn.Sequential(nn.Linear(input_dim, hidden_dim), nn.ReLU(), nn.Linear(hidden_dim, output_dim))
-
-    def forward(self, inp):
-        return self.mlp(inp)
 
 
 class TransitionModel(nn.Module):
@@ -249,12 +258,12 @@ def main(args):
     action_dims = 1
 
     # policy model
-    policy = Policy(state_dims=state_dims, hidden_dims=32, min=-2.0, max=2.0).to(args.device)
+    policy = Policy(layers=[state_dims, 300, 1], min=-2.0, max=2.0).to(args.device)
     policy_optim = Adam(policy.parameters(), lr=args.lr)
 
     # value model
     #value = nn.Linear(state_dims, 1)
-    value = MLP(state_dims, 32, 1).to(args.device)
+    value = MLP([state_dims, 300, 1]).to(args.device)
     value_optim = Adam(value.parameters(), lr=args.lr)
 
     # transition model
@@ -263,13 +272,13 @@ def main(args):
     T_optim = Adam(T.parameters(), lr=args.lr)
 
     # reward model
-    R = MLP(state_dims, 128, 1).to(args.device)
+    R = MLP([state_dims, 300, 300, 1]).to(args.device)
     #R = nn.Linear(state_dims, 1)
     R_optim = Adam(R.parameters(), lr=args.lr)
 
     # terminal state model
-    D = nn.Linear(state_dims, 1).to(args.device)
-    D_optim = Adam(D.parameters(), lr=args.lr)
+    # D = nn.Linear(state_dims, 1).to(args.device)
+    # D_optim = Adam(D.parameters(), lr=args.lr)
 
     converged = False
 
@@ -457,7 +466,7 @@ def main(args):
                     VL = (VNK * lam).sum(0)
 
                     policy_optim.zero_grad(), value_optim.zero_grad()
-                    T_optim.zero_grad(), R_optim.zero_grad(), D_optim.zero_grad()
+                    T_optim.zero_grad(), R_optim.zero_grad()#, D_optim.zero_grad()
                     # policy_loss = - VR.mean()
                     policy_loss = -VL.mean()
                     policy_loss.backward()
@@ -467,7 +476,7 @@ def main(args):
 
                     # regress against tau ie: the initial estimated value...
                     policy_optim.zero_grad(), value_optim.zero_grad()
-                    T_optim.zero_grad(), R_optim.zero_grad(), D_optim.zero_grad()
+                    T_optim.zero_grad(), R_optim.zero_grad()#, D_optim.zero_grad()
 
                     VN = VL.detach().reshape(L*N, -1)
                     values = value(trajectory.state.reshape(L*N, -1).to(args.device))
@@ -545,7 +554,7 @@ if __name__ == '__main__':
             'horizon': 15,
             'discount': 0.99,
             'lam': 0.95,
-            'lr': 1e-3
+            'lr': 1e-4
             }
 
     wandb.init(config=args)
