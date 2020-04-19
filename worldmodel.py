@@ -102,13 +102,15 @@ def gather_seed_episodes(env, seed_episodes):
 
 
 class MLP(nn.Module):
-    def __init__(self, layers):
+    def __init__(self, layers, nonlin=None):
         super().__init__()
         in_dims = layers[0]
         net = []
+        # the use of eval here is a security bug
+        nonlin = nn.ELU if nonlin is None else eval(nonlin)
         for hidden in layers[1:-1]:
             net += [nn.Linear(in_dims, hidden)]
-            net += [nn.ELU()]
+            net += [nonlin()]
             in_dims = hidden
         net += [nn.Linear(in_dims, layers[-1], bias=False)]
 
@@ -211,11 +213,14 @@ class Curses:
         self.stdscr.addstr(h, len(str), " " * (self.width - len(str) - 1))
         self.stdscr.attroff(curses.color_pair(color_pair))
 
-    def update_table(self, table):
+    def update_table(self, table, h=0, title=None):
         assert len(table.shape) == 2
+        if title is not None:
+            self._write_row(title, h=h)
+            h = h+1
         for i in range(table.shape[0]):
             table_str = np.array2string(table[i], max_line_width=self.width)
-            self._write_row(table_str, i)
+            self._write_row(table_str, i+h)
         self.stdscr.refresh()
 
 
@@ -254,25 +259,25 @@ def main(args):
     train_episode, test_episode = args.seed_episodes, args.seed_episodes
 
     eps = 0.05
-    state_dims = 3
-    action_dims = 1
 
     # policy model
-    policy = Policy(layers=[state_dims, 300, 1], min=-2.0, max=2.0).to(args.device)
+    policy = Policy(layers=[args.state_dims, *args.policy_hidden_dims, 1], min=-2.0, max=2.0).to(args.device)
     policy_optim = Adam(policy.parameters(), lr=args.lr)
 
     # value model
     #value = nn.Linear(state_dims, 1)
-    value = MLP([state_dims, 300, 1]).to(args.device)
+    value = MLP([args.state_dims, *args.value_hidden_dims, 1], nonlin=args.nonlin).to(args.device)
     value_optim = Adam(value.parameters(), lr=args.lr)
 
     # transition model
     #T = nn.LSTM(input_size=state_dims + action_dims, hidden_size=state_dims, num_layers=2)
-    T = TransitionModel(input_dim=state_dims + action_dims, hidden_dim=32, output_dim=state_dims, layers=2).to(args.device)
+    T = TransitionModel(input_dim=args.state_dims + args.action_dims,
+                        hidden_dim=args.transition_hidden_dim, output_dim=args.state_dims,
+                        layers=args.transition_layers).to(args.device)
     T_optim = Adam(T.parameters(), lr=args.lr)
 
     # reward model
-    R = MLP([state_dims, 300, 300, 1]).to(args.device)
+    R = MLP([args.state_dims, *args.reward_hidden_dims, 1], nonlin=args.nonlin).to(args.device)
     #R = nn.Linear(state_dims, 1)
     R_optim = Adam(R.parameters(), lr=args.lr)
 
@@ -428,10 +433,13 @@ def main(args):
 
                     # clip the top row
                     rstack = rstack[1:, :]
+
+                    # occasionally dump table to screen for analysis
                     if rstack_cooldown():
-                        scr.update_slot('cooldown', str(rstack_cooldown.last_cooldown))
-                        snapshot = rstack[:, :, 0, 0, 0].detach().cpu().numpy()
-                        scr.update_table(snapshot)
+                        snapshot = rstack[-1:, :, 0, 0, 0].detach().cpu().numpy()
+                        scr.update_table(snapshot, title='imagined rewards and values')
+                        imagined_trajectory = torch.stack(imagine)[:, 0, 0, :].detach().cpu().numpy().T
+                        scr.update_table(imagined_trajectory, h=3, title='imagined trajectory')
 
                         #t = wandb.Table(data=)
                         #wandb.log({'imagination': t})
@@ -491,7 +499,7 @@ def main(args):
 
             #pbar.close()
 
-        for _ in range(5):
+        for _ in range(3):
             train_buf, reward = gather_experience(train_buff, train_episode, env, policy,
                                                   eps=eps, eps_policy=random_policy)
             train_episode += 1
@@ -554,7 +562,15 @@ if __name__ == '__main__':
             'horizon': 15,
             'discount': 0.99,
             'lam': 0.95,
-            'lr': 1e-4
+            'lr': 1e-3,
+            'state_dims': 3,
+            'policy_hidden_dims': [300],
+            'value_hidden_dims': [300],
+            'reward_hidden_dims': [300, 300],
+            'nonlin': 'nn.ELU',
+            'action_dims': 1,
+            'transition_layers': 2,
+            'transition_hidden_dim': 32
             }
 
     wandb.init(config=args)

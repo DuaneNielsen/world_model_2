@@ -11,7 +11,6 @@ from tqdm import tqdm
 
 from data.utils import SARI, one_hot
 
-
 class Buffer:
     def __init__(self):
         self.trajectories = []
@@ -22,6 +21,11 @@ class Buffer:
         self.action_max = 0
 
     def append(self, traj_id, state, action, reward, done, info):
+        """subclass and override this method to get different buffer write behavior"""
+        self._append(traj_id, state, action, reward, done, info)
+
+    def _append(self, traj_id, state, action, reward, done, info):
+        """ replaces if traj_id already exists in buffer, else appends"""
         if traj_id >= len(self.trajectories):
             self.trajectories.append([])
         t = len(self.trajectories[traj_id])
@@ -51,6 +55,22 @@ class Buffer:
                 i = max(i, 0)
             prefix.append(self.trajectories[traj_id][i])
         return prefix
+
+    def subsequence_index(self, length):
+        """
+        builds an index so that any element in the index wll always be followed by at least length steps
+        this is done by excluding the tail of the sequence from the index
+        ie: [t0, t1, t2, t3, t4] with length 3 will build an index of [t0, t1, t2]
+        ensures that sampling the index will always return the start point of valid subsequence of at least length
+        :param length: the length of subseqences
+        :return: the index
+        """
+        index = []
+        for traj_id, traj in enumerate(self.trajectories):
+            end = len(traj) - length + 1
+            for s in range(0, end):
+                index.append((traj_id, s))
+        return index
 
     def __len__(self):
         return len(self.trajectories)
@@ -84,6 +104,33 @@ class SARDataset(Dataset):
                 'action': np.stack(action),
                 'reward': np.stack(reward),
                 'mask': self.mask_f(state, reward, action)}
+
+
+class SARNextDataset(Dataset):
+    def __init__(self, buffer, mask_f=None):
+        super().__init__()
+        self.b = buffer
+        self.mask_f = mask_f if mask_f is not None else mask_all
+
+    def __len__(self):
+        return len(self.b.trajectories)
+
+    def __getitem__(self, item):
+        trajectory = self.b.trajectories[item]
+        state, reward, action, mask = [], [], [], []
+        for step in trajectory:
+            state += [step.state]
+            reward += [step.reward]
+            if isinstance(step.action, int):
+                action += [one_hot(step.action, self.b.action_max)]
+            else:
+                action += [step.action]
+
+        return {'state': np.stack(state[:-1]),
+                'action': np.stack(action[:-1]),
+                'reward': np.stack(reward[:-1]),
+                'next_state': np.stack(state[1:]),
+                'mask': self.mask_f(state[:-1], reward[:-1], action[:-1])}
 
 
 class SARNextDataset(Dataset):

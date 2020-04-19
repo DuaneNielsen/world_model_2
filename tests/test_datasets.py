@@ -1,4 +1,4 @@
-from data.datasets import SARDataset, gather_data
+from data.datasets import SARDataset, gather_data, Buffer
 from viz import debug_image
 from functional import gaussian_like_function, multivariate_gaussian, multivariate_diag_gaussian
 from data.utils import chomp, pad_collate
@@ -181,3 +181,19 @@ def test_multivariate_gaussian():
     # assert np.allclose(one_hot(0, 5), action[0, 0, :])
     # assert np.allclose(one_hot(1, 5), action[0, 1, :])
     # assert np.allclose(one_hot(5, 5), action[0, 5, :])
+
+
+def test_subsequence_index():
+    b = Buffer()
+    traj1 = [(s, 0, 0, True, 'traj1') for s in range(10)]
+    traj2 = [(s, 0, 0, True, 'traj2') for s in range(5)]
+
+    for step in traj1:
+        b.append(0, *step)
+
+    for step in traj2:
+        b.append(1, *step)
+
+    index = b.subsequence_index(3)
+
+    print([i for i in index])
