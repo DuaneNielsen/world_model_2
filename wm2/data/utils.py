@@ -58,6 +58,18 @@ def pad_collate(batch):
         data[key] = torch.from_numpy(batch[0][key]).unsqueeze(0)
     return TensorNamespace(**data)
 
+
+def pad_collate_old(batch):
+    longest = max([trajectory['state'].shape[0] for trajectory in batch])
+    data = pad(batch, longest)
+    dtype = data[next(iter(data))].dtype
+    mask = make_mask(batch, longest, dtype=dtype)
+    data['mask'] = mask
+    for key in data:
+        data[key] = torch.from_numpy(data[key])
+    return TensorNamespace(**data)
+
+
 # def pad_collate_2(batch):
 #     """
 #     returns batch in [T, B, D] format (timesteps, Batch, dimensions)

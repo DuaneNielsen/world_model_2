@@ -11,6 +11,7 @@ from tqdm import tqdm
 
 from data.utils import SARI, one_hot
 
+
 class Buffer:
     def __init__(self):
         self.trajectories = []
@@ -347,11 +348,10 @@ def sample_action(state, policy, prepro, env, eps):
         # s = torch.from_numpy(state.__array__()).unsqueeze(0).float()
         s = prepro(state).unsqueeze(0)
         action_dist, value = policy(s)
-        action = Categorical(logits=action_dist).sample().squeeze().numpy()
+        action = Categorical(logits=action_dist).sample().squeeze().numpy().item()
     else:
         action = env.action_space.sample()
     return action
-
 
 def gather_data(episodes, env, render=False):
     buff = Buffer()
@@ -367,12 +367,12 @@ def gather_data(episodes, env, render=False):
     for trajectory in tqdm(range(episodes)):
         state, reward, done, info = env.reset(), 0.0, False, {}
         action = sample_action(state, policy, prepro, env, 0.9)
-        buff.append(trajectory, state, action, reward, done, info)
+        buff.append(trajectory, state, action, np.float32(reward), done, info)
 
         while not done:
             state, reward, done, info = env.step(action)
             action = sample_action(state, policy, prepro, env, 0.09)
-            buff.append(trajectory, state, action, reward, done, info)
+            buff.append(trajectory, state, action, np.float32(reward), done, info)
             if render:
                 sleep(0.04)
                 env.render()

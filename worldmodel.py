@@ -51,8 +51,10 @@ class LinEnv:
 def policy_prepro(state):
     return torch.tensor(state).float().to(args.device)
 
+
 def buffer_prepro(state):
     return state.astype(np.float32)
+
 
 def action_prepro(action):
     return np.array([action.item()], dtype=np.float32)
@@ -124,13 +126,13 @@ class Policy(nn.Module):
     def __init__(self, layers, min=-1.0, max=1.0):
         super().__init__()
         self.mu = MLP(layers)
-        #self.scale = nn.Linear(state_dims, 1, bias=False)
+        # self.scale = nn.Linear(state_dims, 1, bias=False)
         self.min = min
         self.max = max
 
     def forward(self, state):
         mu = self.mu(state)
-        #scale = torch.sigmoid(self.scale(state))
+        # scale = torch.sigmoid(self.scale(state))
         return ScaledTanhTransformedGaussian(mu, 0.2, min=self.min, max=self.max)
 
 
@@ -201,31 +203,33 @@ class Curses:
             bar = '#' * tics
             self.stdscr.attron(curses.color_pair(2))
             self.stdscr.addstr(self.height - 1, 0, bar)
-            self.stdscr.addstr(self.height - 1, len(bar)," " * (self.width - len(bar) - 1))
+            self.stdscr.addstr(self.height - 1, len(bar), " " * (self.width - len(bar) - 1))
             self.stdscr.attroff(curses.color_pair(2))
             self.stdscr.refresh()
         except curses.error:
             pass
 
     def _write_row(self, str, h=0, w=0, color_pair=0):
-        self.stdscr.attron(curses.color_pair(color_pair))
-        self.stdscr.addstr(h, 0, str)
-        self.stdscr.addstr(h, len(str), " " * (self.width - len(str) - 1))
-        self.stdscr.attroff(curses.color_pair(color_pair))
+        try:
+            self.stdscr.attron(curses.color_pair(color_pair))
+            self.stdscr.addstr(h, 0, str)
+            self.stdscr.addstr(h, len(str), " " * (self.width - len(str) - 1))
+            self.stdscr.attroff(curses.color_pair(color_pair))
+        except curses.error:
+            pass
 
     def update_table(self, table, h=0, title=None):
         assert len(table.shape) == 2
         if title is not None:
             self._write_row(title, h=h)
-            h = h+1
+            h = h + 1
         for i in range(table.shape[0]):
             table_str = np.array2string(table[i], max_line_width=self.width)
-            self._write_row(table_str, i+h)
+            self._write_row(table_str, i + h)
         self.stdscr.refresh()
 
 
 def main(args):
-
     # curses
     scr = Curses()
 
@@ -252,7 +256,7 @@ def main(args):
     # ax1.legend(), ax2.legend(), ax3.legend(), ax4.legend()
 
     # environment
-    #env = LinEnv()
+    # env = LinEnv()
     env = gym.make('Pendulum-v0')
     # env = gym.make('MountainCarContinuous-v0')
     train_buff = gather_seed_episodes(env, args.seed_episodes)
@@ -261,17 +265,22 @@ def main(args):
 
     eps = 0.05
 
+    # # representation model
+    # REPR = TransitionModel(input_dim=args.state_dims + args.action_dims,
+    #                        hidden_dim=3, output_dim=args.state_dims,
+    #                        layers=args.transition_layers).to(args.device)
+
     # policy model
     policy = Policy(layers=[args.state_dims, *args.policy_hidden_dims, 1], min=-2.0, max=2.0).to(args.device)
     policy_optim = Adam(policy.parameters(), lr=args.lr)
 
     # value model
-    #value = nn.Linear(state_dims, 1)
+    # value = nn.Linear(state_dims, 1)
     value = MLP([args.state_dims, *args.value_hidden_dims, 1], nonlin=args.nonlin).to(args.device)
     value_optim = Adam(value.parameters(), lr=args.lr)
 
     # transition model
-    #T = nn.LSTM(input_size=state_dims + action_dims, hidden_size=state_dims, num_layers=2)
+    # T = nn.LSTM(input_size=state_dims + action_dims, hidden_size=state_dims, num_layers=2)
     T = TransitionModel(input_dim=args.state_dims + args.action_dims,
                         hidden_dim=args.transition_hidden_dim, output_dim=args.state_dims,
                         layers=args.transition_layers).to(args.device)
@@ -279,7 +288,7 @@ def main(args):
 
     # reward model
     R = MLP([args.state_dims, *args.reward_hidden_dims, 1], nonlin=args.nonlin).to(args.device)
-    #R = nn.Linear(state_dims, 1)
+    # R = nn.Linear(state_dims, 1)
     R_optim = Adam(R.parameters(), lr=args.lr)
 
     # terminal state model
@@ -303,7 +312,7 @@ def main(args):
             test = DataLoader(test, batch_size=args.batch_size, collate_fn=pad_collate_2, shuffle=True)
             # pbar = Pbar(items_to_process=args.trajectories_per_pass, train_len=len(train), batch_size=args.batch_size,
             #             label='transition')
-            #while pbar.items_processed < args.trajectories_per_pass:
+            # while pbar.items_processed < args.trajectories_per_pass:
 
             for _ in range(1):
 
@@ -312,18 +321,20 @@ def main(args):
                     input = torch.cat((trajectory.state, trajectory.action), dim=2).to(args.device)
                     T_optim.zero_grad()
                     predicted_state, (h, c) = T(input)
-                    loss = ((trajectory.next_state.to(args.device) - predicted_state) ** 2) * trajectory.pad.to(args.device)
+                    loss = ((trajectory.next_state.to(args.device) - predicted_state) ** 2) * trajectory.pad.to(
+                        args.device)
                     loss = loss.mean()
                     loss.backward()
                     T_optim.step()
                     scr.update_slot('transition_train', f'Transition training loss {loss.item()}')
                     wandb.log({'transition_train': loss.item()})
-                    #pbar.update_train_loss_and_checkpoint(loss, models={'transition': T}, optimizer=T_optim)
+                    # pbar.update_train_loss_and_checkpoint(loss, models={'transition': T}, optimizer=T_optim)
 
                 for trajectory in test:
                     input = torch.cat((trajectory.state, trajectory.action), dim=2).to(args.device)
                     predicted_state, (h, c) = T(input)
-                    loss = ((trajectory.next_state.to(args.device) - predicted_state) ** 2) * trajectory.pad.to(args.device)
+                    loss = ((trajectory.next_state.to(args.device) - predicted_state) ** 2) * trajectory.pad.to(
+                        args.device)
                     loss = loss.mean()
                     scr.update_slot('transition_test', f'Transition test loss  {loss.item()}')
                     wandb.log({'transition_test': loss.item()})
@@ -333,37 +344,39 @@ def main(args):
                         scr.update_table(predicted_state[10:20, 0, :].detach().cpu().numpy().T, h=14,
                                          title='predicted')
 
-                    #pbar.update_test_loss_and_save_model(loss, models={'transition': T})
-            #pbar.close()
+                    # pbar.update_test_loss_and_save_model(loss, models={'transition': T})
+            # pbar.close()
 
             # Reward learning
-            #train, test = SARDataset(train_buff, mask_f=reward_mask_f), SARDataset(test_buff, mask_f=reward_mask_f)
+            # train, test = SARDataset(train_buff, mask_f=reward_mask_f), SARDataset(test_buff, mask_f=reward_mask_f)
             train, test = SARDataset(train_buff), SARDataset(test_buff)
             train = DataLoader(train, batch_size=args.batch_size, collate_fn=pad_collate_2, shuffle=True)
             test = DataLoader(test, batch_size=args.batch_size, collate_fn=pad_collate_2, shuffle=True)
             # pbar = Pbar(items_to_process=args.trajectories_per_pass, train_len=len(train),
             #             batch_size=args.batch_size, label='reward')
-            #while pbar.items_processed < args.trajectories_per_pass:
+            # while pbar.items_processed < args.trajectories_per_pass:
             for _ in range(1):
                 for trajectory in train:
                     R_optim.zero_grad()
                     predicted_reward = R(trajectory.state.to(args.device))
-                    loss = (((trajectory.reward.to(args.device) - predicted_reward) * trajectory.pad.to(args.device)) ** 2).mean()
-                    #loss = ((trajectory.reward.to(args.device) - predicted_reward) ** 2).mean()
+                    loss = (((trajectory.reward.to(args.device) - predicted_reward) * trajectory.pad.to(
+                        args.device)) ** 2).mean()
+                    # loss = ((trajectory.reward.to(args.device) - predicted_reward) ** 2).mean()
                     loss.backward()
                     R_optim.step()
                     scr.update_slot('reward_train', f'Reward train loss {loss.item()}')
                     wandb.log({'reward_train': loss.item()})
-                    #pbar.update_train_loss_and_checkpoint(loss)
+                    # pbar.update_train_loss_and_checkpoint(loss)
 
                 for trajectory in test:
                     predicted_reward = R(trajectory.state.to(args.device))
-                    loss = (((trajectory.reward.to(args.device) - predicted_reward) * trajectory.pad.to(args.device)) ** 2).mean()
+                    loss = (((trajectory.reward.to(args.device) - predicted_reward) * trajectory.pad.to(
+                        args.device)) ** 2).mean()
                     scr.update_slot('reward_test', f'Reward test loss  {loss.item()}')
                     wandb.log({'reward_test': loss.item()})
-                    #loss = ((trajectory.reward.to(args.device) - predicted_reward) ** 2).mean()
-                    #pbar.update_test_loss_and_save_model(loss)
-            #pbar.close()
+                    # loss = ((trajectory.reward.to(args.device) - predicted_reward) ** 2).mean()
+                    # pbar.update_test_loss_and_save_model(loss)
+            # pbar.close()
 
             # Terminal state learning
             # train, test = SDDataset(train_buff), SDDataset(test_buff)
@@ -397,24 +410,42 @@ def main(args):
             # pbar = Pbar(items_to_process=args.trajectories_per_pass, train_len=len(train),
             #             batch_size=args.batch_size, label='behavior')
 
-            #while pbar.items_processed < 10:
+            # while pbar.items_processed < 10:
             for _ in range(1):
+
                 for trajectory in train:
-                    imagine = [torch.cat((trajectory.state, trajectory.action), dim=2).to(args.device)]
-                    reward = [R(trajectory.state.to(args.device))]
-                    #done = [D(trajectory.state.to(args.device))]
-                    v = [value(trajectory.state.to(args.device))]
+
+                    # compute the cell values for the sampled trajectory
+                    h, c = None, None
+                    with torch.no_grad():
+                        h_traj, c_traj = [], []
+                        h_shape = args.transition_layers, trajectory.state.size(1), args.transition_hidden_dim
+                        h, c = torch.zeros(h_shape, device=args.device), torch.zeros(h_shape, device=args.device)
+                        h_traj.append(h)
+                        c_traj.append(c)
+                        for state, action in zip(trajectory.state, trajectory.action):
+                            s = torch.cat((state, action), dim=1).to(args.device).unsqueeze(0)
+                            s, (h, c) = T(s, (h, c))
+                            h_traj.append(h)
+                            c_traj.append(c)
+                        h = torch.cat(h_traj[:-1], dim=1)
+                        c = torch.cat(c_traj[:-1], dim=1)
+
+                    imagine = [torch.cat((trajectory.state, trajectory.action), dim=2).to(args.device).permute(1, 0, 2)]
+                    reward = [R(trajectory.state.to(args.device).permute(1, 0, 2))]
+                    # done = [D(trajectory.state.to(args.device))]
+                    v = [value(trajectory.state.to(args.device).permute(1, 0, 2))]
 
                     # imagine forward here
                     for tau in range(args.horizon):
-                        state, (h, c) = T(imagine[tau])
+                        state, (h, c) = T(imagine[tau], (h, c))
                         action = policy(state).rsample()
                         reward += [R(state)]
-                        #done += [D(state)]
+                        # done += [D(state)]
                         v += [value(state)]
                         imagine += [torch.cat((state, action), dim=2)]
 
-                    #VR = torch.mean(torch.stack(reward), dim=0)
+                    # VR = torch.mean(torch.stack(reward), dim=0)
                     rstack, vstack = torch.stack(reward), torch.stack(v)
                     H, L, N, S = rstack.shape
 
@@ -448,8 +479,8 @@ def main(args):
                         imagined_trajectory = torch.stack(imagine)[:, 0, 0, :].detach().cpu().numpy().T
                         scr.update_table(imagined_trajectory, h=3, title='imagined trajectory')
 
-                        #t = wandb.Table(data=)
-                        #wandb.log({'imagination': t})
+                        # t = wandb.Table(data=)
+                        # wandb.log({'imagination': t})
 
                     """ reduce the above matrix to values using the formula from the paper in 2 steps
                     first, compute VN for each k by applying discounts to each time-step and compute the expected value
@@ -476,12 +507,13 @@ def main(args):
                     Note the lambda terms should sum to 1, or you're doing it wrong
                     """
 
-                    lam = torch.full((VNK.size(0),), args.lam, device=args.device).pow(torch.arange(VNK.size(0), device=args.device)).view(-1, 1, 1, 1)
+                    lam = torch.full((VNK.size(0),), args.lam, device=args.device).pow(
+                        torch.arange(VNK.size(0), device=args.device)).view(-1, 1, 1, 1)
                     lam[0:-1] = lam[0:-1] * (1 - args.lam)
                     VL = (VNK * lam).sum(0)
 
                     policy_optim.zero_grad(), value_optim.zero_grad()
-                    T_optim.zero_grad(), R_optim.zero_grad()#, D_optim.zero_grad()
+                    T_optim.zero_grad(), R_optim.zero_grad()  # , D_optim.zero_grad()
                     # policy_loss = - VR.mean()
                     policy_loss = -VL.mean()
                     policy_loss.backward()
@@ -491,20 +523,20 @@ def main(args):
 
                     # regress against tau ie: the initial estimated value...
                     policy_optim.zero_grad(), value_optim.zero_grad()
-                    T_optim.zero_grad(), R_optim.zero_grad()#, D_optim.zero_grad()
+                    T_optim.zero_grad(), R_optim.zero_grad()  # , D_optim.zero_grad()
 
-                    VN = VL.detach().reshape(L*N, -1)
-                    values = value(trajectory.state.reshape(L*N, -1).to(args.device))
+                    VN = VL.detach().reshape(L * N, -1)
+                    values = value(trajectory.state.reshape(L * N, -1).to(args.device))
                     value_loss = ((VN - values) ** 2).mean() / 2
                     value_loss.backward()
                     value_optim.step()
                     scr.update_slot('value_loss', f'Value loss  {value_loss.item()}')
                     wandb.log({'value_loss': value_loss.item()})
 
-                    #pbar.update_train_loss_and_checkpoint(policy_loss, models={'policy': policy},
+                    # pbar.update_train_loss_and_checkpoint(policy_loss, models={'policy': policy},
                     #                                                          optimizer=policy_optim)
 
-            #pbar.close()
+            # pbar.close()
 
         for _ in range(3):
             train_buf, reward = gather_experience(train_buff, train_episode, env, policy,
@@ -546,7 +578,6 @@ def main(args):
         #
         # fig.canvas.draw()
 
-
         if random() < 1.1:
             test_buff, reward = gather_experience(test_buff, test_episode, env, policy,
                                                   eps=eps, eps_policy=random_policy)
@@ -564,7 +595,7 @@ def main(args):
 if __name__ == '__main__':
     args = {'seed_episodes': 40,
             'collect_interval': 10,
-            'batch_size': 8,
+            'batch_size': 1,
             'device': 'cuda:0',
             'horizon': 15,
             'discount': 0.99,

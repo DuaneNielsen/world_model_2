@@ -213,7 +213,7 @@ def train_predictor(mu_encoder, mu_decoder, train_buff, test_buff, items_total, 
 
     while pbar.items_processed < items_total:
         for mb in train:
-            seqs = autoregress(mb.state, mb.action, mb.reward, mb.mask, target_start, target_len).to(device)
+            seqs = autoregress(mb.state, mb.action, mb.reward.unsqueeze(2), mb.mask, target_start, target_len).to(device)
             optim.zero_grad()
             inp = torch.cat((seqs.source, seqs.action), dim=2)
             hidden = mu_encoder(inp)
@@ -237,7 +237,7 @@ def train_predictor(mu_encoder, mu_decoder, train_buff, test_buff, items_total, 
             if train_cooldown():
                 with torch.no_grad():
                     for i, mb in enumerate(test):
-                        seqs = autoregress(mb.state, mb.action, mb.reward, mb.mask, target_start, target_len).to(device)
+                        seqs = autoregress(mb.state, mb.action, mb.reward.unsqueeze(2), mb.mask, target_start, target_len).to(device)
                         inp = torch.cat((seqs.source, seqs.action), dim=2)
                         hidden = mu_encoder(inp)
 
@@ -425,7 +425,7 @@ def reward_mask_f(state, reward, action):
     return nonzero[:, np.newaxis]
 
 
-def main(ensemble, load_dir):
+def main(ensemble, load_dir=None):
     env = gym.make('PongNoFrameskip-v4')
     env = wrappers.NoopResetEnv(env, noop_max=30)
     env = wrappers.MaxAndSkipEnv(env, skip=4)
@@ -490,7 +490,7 @@ if __name__ == '__main__':
                device='cuda:1',
                horizon=6,
                samples=2,
-               demo=True)
+               demo=False)
 
     ensemble = {}
     ensemble['player'] = SimpleNamespace(state_dims=4, action_dims=6, reward_dims=1, hidden=[512, 512, 512, 512],
@@ -516,7 +516,8 @@ if __name__ == '__main__':
     # horizon 10
     #load_dir = 'wandb/dryrun-20200405_002951-fx78ujfz'
     # horizon 20
-    load_dir = 'wandb/run-20200405_182039-5y0p6qwg'
+    # load_dir = 'wandb/run-20200405_182039-5y0p6qwg'
+    load_dir = None
 
     wandb.init(config=dev)
 
