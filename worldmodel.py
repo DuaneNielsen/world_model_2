@@ -232,7 +232,8 @@ def main(args):
     # monitoring
     recent_reward = deque(maxlen=20)
     wandb.gym.monitor()
-    rstack_cooldown = wm2.utils.Cooldown(secs=30)
+    imagine_log_cooldown = wm2.utils.Cooldown(secs=30)
+    transition_log_cooldown = wm2.utils.Cooldown(secs=30)
 
     # visualization
     # plt.ion()
@@ -326,6 +327,12 @@ def main(args):
                     loss = loss.mean()
                     scr.update_slot('transition_test', f'Transition test loss  {loss.item()}')
                     wandb.log({'transition_test': loss.item()})
+                    if transition_log_cooldown():
+                        scr.update_table(trajectory.next_state[10:20, 0, :].detach().cpu().numpy().T, h=10,
+                                         title='next_state')
+                        scr.update_table(predicted_state[10:20, 0, :].detach().cpu().numpy().T, h=14,
+                                         title='predicted')
+
                     #pbar.update_test_loss_and_save_model(loss, models={'transition': T})
             #pbar.close()
 
@@ -435,7 +442,7 @@ def main(args):
                     rstack = rstack[1:, :]
 
                     # occasionally dump table to screen for analysis
-                    if rstack_cooldown():
+                    if imagine_log_cooldown():
                         snapshot = rstack[-1:, :, 0, 0, 0].detach().cpu().numpy()
                         scr.update_table(snapshot, title='imagined rewards and values')
                         imagined_trajectory = torch.stack(imagine)[:, 0, 0, :].detach().cpu().numpy().T
