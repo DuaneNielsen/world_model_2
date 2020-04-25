@@ -9,6 +9,7 @@ import torch.nn as nn
 from torch.optim import Adam
 from torch.utils.data import DataLoader, WeightedRandomSampler, ConcatDataset
 import torch.nn.functional as F
+from torch.nn.utils import clip_grad_norm_
 import numpy as np
 import wandb
 import gym
@@ -159,6 +160,27 @@ def reward_mask_f(state, reward, action):
     return nonzero[:, np.newaxis]
 
 
+class DummyCurses:
+    """  Drop this in when you want to disable curses """
+    def __init__(self):
+        pass
+
+    def clear(self):
+        pass
+
+    def refresh(self):
+        pass
+
+    def update_slot(self, label, string):
+        pass
+
+    def update_progressbar(self, tics):
+        pass
+
+    def update_table(self, table, h=0, title=None):
+        pass
+
+
 class Curses:
     def __init__(self):
         self.stdscr = curses.initscr()
@@ -178,11 +200,21 @@ class Curses:
 
         self.bar = OrderedDict()
 
+    def _resize(self):
+        resize = curses.is_term_resized(self.height, self.width)
+
+        # Action in loop if resize is True:
+        if resize is True:
+            self.height, self.width = self.stdscr.getmaxyx()
+            self.stdscr.clear()
+            curses.resizeterm(self.height, self.width)
+
     def clear(self):
         self.stdscr.clear()
         self.height, self.width = self.stdscr.getmaxyx()
 
     def refresh(self):
+        self._resize()
         self.stdscr.refresh()
 
     def update_slot(self, label, string):
@@ -194,7 +226,7 @@ class Curses:
             self.stdscr.addstr(self.height - slot - 2, len(self.bar[label]),
                                " " * (self.width - len(self.bar[label]) - 1))
             self.stdscr.attroff(curses.color_pair(1))
-            self.stdscr.refresh()
+            self.refresh()
         except curses.error:
             pass
 
@@ -205,7 +237,7 @@ class Curses:
             self.stdscr.addstr(self.height - 1, 0, bar)
             self.stdscr.addstr(self.height - 1, len(bar), " " * (self.width - len(bar) - 1))
             self.stdscr.attroff(curses.color_pair(2))
-            self.stdscr.refresh()
+            self.refresh()
         except curses.error:
             pass
 
@@ -226,7 +258,7 @@ class Curses:
         for i in range(table.shape[0]):
             table_str = np.array2string(table[i], max_line_width=self.width)
             self._write_row(table_str, i + h)
-        self.stdscr.refresh()
+        self.refresh()
 
 
 def main(args):
@@ -317,11 +349,11 @@ def main(args):
             for _ in range(1):
 
                 # train transition model
-                for trajectory in train:
-                    input = torch.cat((trajectory.state, trajectory.action), dim=2).to(args.device)
+                for trajectories in train:
+                    input = torch.cat((trajectories.state, trajectories.action), dim=2).to(args.device)
                     T_optim.zero_grad()
                     predicted_state, (h, c) = T(input)
-                    loss = ((trajectory.next_state.to(args.device) - predicted_state) ** 2) * trajectory.pad.to(
+                    loss = ((trajectories.next_state.to(args.device) - predicted_state) ** 2) * trajectories.pad.to(
                         args.device)
                     loss = loss.mean()
                     loss.backward()
@@ -330,19 +362,21 @@ def main(args):
                     wandb.log({'transition_train': loss.item()})
                     # pbar.update_train_loss_and_checkpoint(loss, models={'transition': T}, optimizer=T_optim)
 
-                for trajectory in test:
-                    input = torch.cat((trajectory.state, trajectory.action), dim=2).to(args.device)
+                for trajectories in test:
+                    input = torch.cat((trajectories.state, trajectories.action), dim=2).to(args.device)
                     predicted_state, (h, c) = T(input)
-                    loss = ((trajectory.next_state.to(args.device) - predicted_state) ** 2) * trajectory.pad.to(
+                    loss = ((trajectories.next_state.to(args.device) - predicted_state) ** 2) * trajectories.pad.to(
                         args.device)
                     loss = loss.mean()
                     scr.update_slot('transition_test', f'Transition test loss  {loss.item()}')
                     wandb.log({'transition_test': loss.item()})
                     if transition_log_cooldown():
-                        scr.update_table(trajectory.next_state[10:20, 0, :].detach().cpu().numpy().T, h=10,
+                        scr.update_table(trajectories.next_state[10:20, 0, :].detach().cpu().numpy().T, h=10,
                                          title='next_state')
                         scr.update_table(predicted_state[10:20, 0, :].detach().cpu().numpy().T, h=14,
                                          title='predicted')
+                        scr.update_table(trajectories.action[10:20, 0, :].detach().cpu().numpy().T, h=16,
+                                         title='action')
 
                     # pbar.update_test_loss_and_save_model(loss, models={'transition': T})
             # pbar.close()
@@ -356,10 +390,10 @@ def main(args):
             #             batch_size=args.batch_size, label='reward')
             # while pbar.items_processed < args.trajectories_per_pass:
             for _ in range(1):
-                for trajectory in train:
+                for trajectories in train:
                     R_optim.zero_grad()
-                    predicted_reward = R(trajectory.state.to(args.device))
-                    loss = (((trajectory.reward.to(args.device) - predicted_reward) * trajectory.pad.to(
+                    predicted_reward = R(trajectories.state.to(args.device))
+                    loss = (((trajectories.reward.to(args.device) - predicted_reward) * trajectories.pad.to(
                         args.device)) ** 2).mean()
                     # loss = ((trajectory.reward.to(args.device) - predicted_reward) ** 2).mean()
                     loss.backward()
@@ -368,9 +402,9 @@ def main(args):
                     wandb.log({'reward_train': loss.item()})
                     # pbar.update_train_loss_and_checkpoint(loss)
 
-                for trajectory in test:
-                    predicted_reward = R(trajectory.state.to(args.device))
-                    loss = (((trajectory.reward.to(args.device) - predicted_reward) * trajectory.pad.to(
+                for trajectories in test:
+                    predicted_reward = R(trajectories.state.to(args.device))
+                    loss = (((trajectories.reward.to(args.device) - predicted_reward) * trajectories.pad.to(
                         args.device)) ** 2).mean()
                     scr.update_slot('reward_test', f'Reward test loss  {loss.item()}')
                     wandb.log({'reward_test': loss.item()})
@@ -413,28 +447,32 @@ def main(args):
             # while pbar.items_processed < 10:
             for _ in range(1):
 
-                for trajectory in train:
+                for trajectories in train:
 
                     # compute the cell values for the sampled trajectory
                     h, c = None, None
                     with torch.no_grad():
-                        h_traj, c_traj = [], []
-                        h_shape = args.transition_layers, trajectory.state.size(1), args.transition_hidden_dim
+                        s_traj, h_traj, c_traj = [], [], []
+                        h_shape = args.transition_layers, trajectories.state.size(1), args.transition_hidden_dim
                         h, c = torch.zeros(h_shape, device=args.device), torch.zeros(h_shape, device=args.device)
-                        h_traj.append(h)
-                        c_traj.append(c)
-                        for state, action in zip(trajectory.state, trajectory.action):
-                            s = torch.cat((state, action), dim=1).to(args.device).unsqueeze(0)
-                            s, (h, c) = T(s, (h, c))
+
+                        for state, action in zip(trajectories.state, trajectories.action):
+                            if action.max() > 2.0 or action.min() < -2.0:
+                                print(f'imaginination {action.max()} {action.min()}')
                             h_traj.append(h)
                             c_traj.append(c)
-                        h = torch.cat(h_traj[:-1], dim=1)
-                        c = torch.cat(c_traj[:-1], dim=1)
+                            s = torch.cat((state, action), dim=1).to(args.device).unsqueeze(0)
+                            s_traj.append(s)
+                            s, (h, c) = T(s, (h, c))
 
-                    imagine = [torch.cat((trajectory.state, trajectory.action), dim=2).to(args.device).permute(1, 0, 2)]
-                    reward = [R(trajectory.state.to(args.device).permute(1, 0, 2))]
+                        h = torch.cat(h_traj, dim=1)
+                        c = torch.cat(c_traj, dim=1)
+                        s = torch.cat(s_traj, dim=1)
+
+                    imagine = [s]
+                    reward = [R(s[:, :, :-args.action_dims])]
                     # done = [D(trajectory.state.to(args.device))]
-                    v = [value(trajectory.state.to(args.device).permute(1, 0, 2))]
+                    v = [value(s[:, :, :-args.action_dims])]
 
                     # imagine forward here
                     for tau in range(args.horizon):
@@ -474,8 +512,10 @@ def main(args):
 
                     # occasionally dump table to screen for analysis
                     if imagine_log_cooldown():
-                        snapshot = rstack[-1:, :, 0, 0, 0].detach().cpu().numpy()
-                        scr.update_table(snapshot, title='imagined rewards and values')
+                        rewards = rstack[-1:, :, 0, 0, 0].detach().cpu().numpy()
+                        scr.update_table(rewards, title='imagined rewards and values')
+                        v = vstack[:, 0, 0, 0].unsqueeze(0).detach().cpu().numpy()
+                        scr.update_table(v, h=2)
                         imagined_trajectory = torch.stack(imagine)[:, 0, 0, :].detach().cpu().numpy().T
                         scr.update_table(imagined_trajectory, h=3, title='imagined trajectory')
 
@@ -517,6 +557,7 @@ def main(args):
                     # policy_loss = - VR.mean()
                     policy_loss = -VL.mean()
                     policy_loss.backward()
+                    clip_grad_norm_(parameters=policy.parameters(), max_norm=100.0)
                     policy_optim.step()
                     scr.update_slot('policy_loss', f'Policy loss  {policy_loss.item()}')
                     wandb.log({'policy_loss': policy_loss.item()})
@@ -526,9 +567,10 @@ def main(args):
                     T_optim.zero_grad(), R_optim.zero_grad()  # , D_optim.zero_grad()
 
                     VN = VL.detach().reshape(L * N, -1)
-                    values = value(trajectory.state.reshape(L * N, -1).to(args.device))
+                    values = value(trajectories.state.reshape(L * N, -1).to(args.device))
                     value_loss = ((VN - values) ** 2).mean() / 2
                     value_loss.backward()
+                    clip_grad_norm_(parameters=value.parameters(), max_norm=100.0)
                     value_optim.step()
                     scr.update_slot('value_loss', f'Value loss  {value_loss.item()}')
                     wandb.log({'value_loss': value_loss.item()})
@@ -539,7 +581,7 @@ def main(args):
             # pbar.close()
 
         for _ in range(3):
-            train_buf, reward = gather_experience(train_buff, train_episode, env, policy,
+            train_buff, reward = gather_experience(train_buff, train_episode, env, policy,
                                                   eps=eps, eps_policy=random_policy)
             train_episode += 1
 

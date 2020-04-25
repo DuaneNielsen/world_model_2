@@ -47,11 +47,11 @@ def chomp(seq, end, dim, bite_size):
 
 
 def pad_collate(batch):
-    #longest = max([trajectory['state'].shape[0] for trajectory in batch])
-    #data = pad(batch, longest)
-    #dtype = data[next(iter(data))].dtype
-    #mask = make_mask(batch, longest, dtype=dtype)
-    #data['mask'] = mask
+    # longest = max([trajectory['state'].shape[0] for trajectory in batch])
+    # data = pad(batch, longest)
+    # dtype = data[next(iter(data))].dtype
+    # mask = make_mask(batch, longest, dtype=dtype)
+    # data['mask'] = mask
     # todo temporary fix until we support batches of trajectories
     data = {}
     for key in batch[0]:
@@ -98,12 +98,21 @@ def pad_collate_old(batch):
 #         data[key] = torch.stack(data[key]).permute(1, 0, 2)
 #     return TensorNamespace(**data)
 
-def pad_collate_2(batch):
+def pad_collate_3(batch):
     """
     returns batch in [T, B, D] format (timesteps, Batch, dimensions)
     :param batch:
     :return:
     """
+
+    for b in batch:
+        a = np.stack(b['action'])
+        print(f' pad_collate_2 {a.max()} {a.min()}')
+        # a = b['action']
+        if a.max() > 2.0 or a.min() < -2.0:
+            print(f' pad_collate_2 {a.max()} {a.min()}')
+
+
     lengths = [trajectory['state'].shape[0] for trajectory in batch]
     longest = max(lengths)
     data = {'pad': []}
@@ -117,20 +126,76 @@ def pad_collate_2(batch):
         dtype[key] = batch[0][key].dtype
 
     for i, element in enumerate(batch):
-        data['pad'] += [np.concatenate((np.ones(lengths[i], dtype=np.float32), np.zeros(longest-lengths[i], dtype=np.float32)))]
-        for key in element:
-            padding = np.zeros((longest - lengths[i], shape[key]), dtype=dtype[key])
-            element[key] += np.concatenate((element[key], padding), axis=0)
+        data['pad'] += [np.concatenate(
+            (np.ones(lengths[i], dtype=np.float32), np.zeros(longest - lengths[i], dtype=np.float32)))]
+
+    for key in element:
+        padding = np.zeros((longest - lengths[i], shape[key]), dtype=dtype[key])
+        element[key] += np.concatenate((element[key], padding), axis=0)
 
     # populate the sequences from the batch
     for i, element in enumerate(batch):
         data['pad'][i] = torch.from_numpy(data['pad'][i]).view(-1, 1)
         for key in element:
-                data[key] += [torch.from_numpy(element[key])]
+            data[key] += [torch.from_numpy(element[key])]
 
     for key in data:
         data[key] = torch.stack(data[key]).permute(1, 0, 2)
+
+    mx = data['action'].max()
+    mn = data['action'].min()
+    print(f' pad_collate_out {mx} {mn}')
+
     return TensorNamespace(**data)
+
+
+def pad_tensor(lengths):
+    """
+    returns a tensor that indicates which sequences are padded by 0 and 1
+    :param lengths: an array with the lengths of each sequence [30, 43, 56]
+    :return: a tensor [max_len, batch_size, 1] of ones and zeros
+    """
+    T, B, D = max(lengths), len(lengths), 1
+    pad = torch.zeros(T, B, D)
+    for i, l in enumerate(lengths):
+        pad[torch.arange(0, l), i] = 1.0
+    return pad
+
+
+def pad_collate_2(batch):
+    """
+    returns batch in [T, B, D] format (timesteps, Batch, dimensions)
+    :param batch: a list of dictionaries containing numpy arrays of [T, D]
+    :return: [T, B, D] formatted batch, zero padded at the sequence ends
+    """
+
+    lengths = [trajectory['state'].shape[0] for trajectory in batch]
+    T, B = max(lengths), len(batch)
+
+    shape = {}
+    dtype = {}
+    keys = [k for k in batch[0]]
+
+    # initialize parameters
+    for key in keys:
+        shape[key] = batch[0][key].shape[1]
+
+    data = {}
+
+    # initialize zero tensors
+    for key in keys:
+        data[key] = torch.zeros(T, B, shape[key])
+
+    # copy the data
+    for i, (trajectory, length) in enumerate(zip(batch, lengths)):
+        for key in trajectory:
+            data[key][torch.arange(0, length), i] = torch.from_numpy(trajectory[key].astype(np.float32))
+
+    # add indicators for the padding, can be used as a loss mask
+    data['pad'] = pad_tensor(lengths)
+
+    return TensorNamespace(**data)
+
 
 
 def autoregress(state, action, reward, mask, target_start=0, target_length=None, advance=1):
@@ -188,7 +253,7 @@ def chomp_and_pad(i, dim, bite_size=1, mode='head', pad_mode='zeros'):
         pad = torch.zeros(*pad_size, dtype=i.dtype, device=i.device)
     elif pad_mode == 'fill':
         if mode == 'head':
-            pad = torch.index_select(i, dim=dim, index=torch.tensor([length-1], device=i.device))
+            pad = torch.index_select(i, dim=dim, index=torch.tensor([length - 1], device=i.device))
         elif mode == 'tail':
             pad = torch.index_select(i, dim=dim, index=torch.tensor([0], device=i.device))
         else:
