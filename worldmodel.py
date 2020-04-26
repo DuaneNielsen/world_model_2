@@ -239,59 +239,56 @@ def main(args):
             train = DataLoader(train, batch_size=args.batch_size, collate_fn=pad_collate_2, shuffle=True)
             test = DataLoader(test, batch_size=args.batch_size, collate_fn=pad_collate_2, shuffle=True)
 
-            for _ in range(1):
+            # train transition model
+            for trajectories in train:
+                input = torch.cat((trajectories.state, trajectories.action), dim=2).to(args.device)
+                T_optim.zero_grad()
+                predicted_state, (h, c) = T(input)
+                loss = ((trajectories.next_state.to(args.device) - predicted_state) ** 2) * trajectories.pad.to(
+                    args.device)
+                loss = loss.mean()
+                loss.backward()
+                T_optim.step()
+                scr.update_slot('transition_train', f'Transition training loss {loss.item()}')
+                wandb.log({'transition_train': loss.item()})
 
-                # train transition model
-                for trajectories in train:
-                    input = torch.cat((trajectories.state, trajectories.action), dim=2).to(args.device)
-                    T_optim.zero_grad()
-                    predicted_state, (h, c) = T(input)
-                    loss = ((trajectories.next_state.to(args.device) - predicted_state) ** 2) * trajectories.pad.to(
-                        args.device)
-                    loss = loss.mean()
-                    loss.backward()
-                    T_optim.step()
-                    scr.update_slot('transition_train', f'Transition training loss {loss.item()}')
-                    wandb.log({'transition_train': loss.item()})
-
-                for trajectories in test:
-                    input = torch.cat((trajectories.state, trajectories.action), dim=2).to(args.device)
-                    predicted_state, (h, c) = T(input)
-                    loss = ((trajectories.next_state.to(args.device) - predicted_state) ** 2) * trajectories.pad.to(
-                        args.device)
-                    loss = loss.mean()
-                    scr.update_slot('transition_test', f'Transition test loss  {loss.item()}')
-                    wandb.log({'transition_test': loss.item()})
-                    if transition_log_cooldown():
-                        scr.update_table(trajectories.next_state[10:20, 0, :].detach().cpu().numpy().T, h=10,
-                                         title='next_state')
-                        scr.update_table(predicted_state[10:20, 0, :].detach().cpu().numpy().T, h=14,
-                                         title='predicted')
-                        scr.update_table(trajectories.action[10:20, 0, :].detach().cpu().numpy().T, h=16,
-                                         title='action')
+            for trajectories in test:
+                input = torch.cat((trajectories.state, trajectories.action), dim=2).to(args.device)
+                predicted_state, (h, c) = T(input)
+                loss = ((trajectories.next_state.to(args.device) - predicted_state) ** 2) * trajectories.pad.to(
+                    args.device)
+                loss = loss.mean()
+                scr.update_slot('transition_test', f'Transition test loss  {loss.item()}')
+                wandb.log({'transition_test': loss.item()})
+                if transition_log_cooldown():
+                    scr.update_table(trajectories.next_state[10:20, 0, :].detach().cpu().numpy().T, h=10,
+                                     title='next_state')
+                    scr.update_table(predicted_state[10:20, 0, :].detach().cpu().numpy().T, h=14,
+                                     title='predicted')
+                    scr.update_table(trajectories.action[10:20, 0, :].detach().cpu().numpy().T, h=16,
+                                     title='action')
 
             # Reward learning
             # train, test = SARDataset(train_buff, mask_f=reward_mask_f), SARDataset(test_buff, mask_f=reward_mask_f)
             train, test = SARDataset(train_buff), SARDataset(test_buff)
             train = DataLoader(train, batch_size=args.batch_size, collate_fn=pad_collate_2, shuffle=True)
             test = DataLoader(test, batch_size=args.batch_size, collate_fn=pad_collate_2, shuffle=True)
-            for _ in range(1):
-                for trajectories in train:
-                    R_optim.zero_grad()
-                    predicted_reward = R(trajectories.state.to(args.device))
-                    loss = (((trajectories.reward.to(args.device) - predicted_reward) * trajectories.pad.to(
-                        args.device)) ** 2).mean()
-                    loss.backward()
-                    R_optim.step()
-                    scr.update_slot('reward_train', f'Reward train loss {loss.item()}')
-                    wandb.log({'reward_train': loss.item()})
+            for trajectories in train:
+                R_optim.zero_grad()
+                predicted_reward = R(trajectories.state.to(args.device))
+                loss = (((trajectories.reward.to(args.device) - predicted_reward) * trajectories.pad.to(
+                    args.device)) ** 2).mean()
+                loss.backward()
+                R_optim.step()
+                scr.update_slot('reward_train', f'Reward train loss {loss.item()}')
+                wandb.log({'reward_train': loss.item()})
 
-                for trajectories in test:
-                    predicted_reward = R(trajectories.state.to(args.device))
-                    loss = (((trajectories.reward.to(args.device) - predicted_reward) * trajectories.pad.to(
-                        args.device)) ** 2).mean()
-                    scr.update_slot('reward_test', f'Reward test loss  {loss.item()}')
-                    wandb.log({'reward_test': loss.item()})
+            for trajectories in test:
+                predicted_reward = R(trajectories.state.to(args.device))
+                loss = (((trajectories.reward.to(args.device) - predicted_reward) * trajectories.pad.to(
+                    args.device)) ** 2).mean()
+                scr.update_slot('reward_test', f'Reward test loss  {loss.item()}')
+                wandb.log({'reward_test': loss.item()})
 
             # Terminal state learning
             # train, test = SDDataset(train_buff), SDDataset(test_buff)
@@ -318,122 +315,121 @@ def main(args):
             train = ConcatDataset([SARDataset(train_buff)])
             train = DataLoader(train, batch_size=args.batch_size, collate_fn=pad_collate_2, shuffle=True)
 
-            for _ in range(1):
-                for trajectory in train:
-                    imagine = [torch.cat((trajectory.state, trajectory.action), dim=2).to(args.device)]
-                    reward = [R(trajectory.state.to(args.device))]
-                    #done = [D(trajectory.state.to(args.device))]
-                    v = [value(trajectory.state.to(args.device))]
+            for trajectory in train:
+                imagine = [torch.cat((trajectory.state, trajectory.action), dim=2).to(args.device)]
+                reward = [R(trajectory.state.to(args.device))]
+                #done = [D(trajectory.state.to(args.device))]
+                v = [value(trajectory.state.to(args.device))]
 
-                    # imagine forward here
-                    for tau in range(args.horizon):
-                        state, (h, c) = T(imagine[tau])
-                        action = policy(state).rsample()
-                        reward += [R(state)]
-                        # done += [D(state)]
-                        v += [value(state)]
-                        imagine += [torch.cat((state, action), dim=2)]
+                # imagine forward here
+                for tau in range(args.horizon):
+                    state, (h, c) = T(imagine[tau])
+                    action = policy(state).rsample()
+                    reward += [R(state)]
+                    # done += [D(state)]
+                    v += [value(state)]
+                    imagine += [torch.cat((state, action), dim=2)]
 
-                    # VR = torch.mean(torch.stack(reward), dim=0)
-                    rstack, vstack = torch.stack(reward), torch.stack(v)
-                    H, L, N, S = rstack.shape
+                # VR = torch.mean(torch.stack(reward), dim=0)
+                rstack, vstack = torch.stack(reward), torch.stack(v)
+                H, L, N, S = rstack.shape
 
-                    """ construct matrix in form
-                    
-                    R0 V1  0  0
-                    R0 R1 V2  0
-                    R0 R1 R2 V3
-                    
-                    Where R0, R1, R2 are predicted rewards at timesteps 0, 1, 2
-                    and V1, V2, V3 are the predicted future values of states at time 1, 2, 3
-                    """
+                """ construct matrix in form
+                
+                R0 V1  0  0
+                R0 R1 V2  0
+                R0 R1 R2 V3
+                
+                Where R0, R1, R2 are predicted rewards at timesteps 0, 1, 2
+                and V1, V2, V3 are the predicted future values of states at time 1, 2, 3
+                """
 
-                    # create a H * H matrix filled with rewards (using rstack preserves computation graph)
-                    rstack = rstack.repeat(H, 1, 1, 1).reshape(H, H, L, N, S)
+                # create a H * H matrix filled with rewards (using rstack preserves computation graph)
+                rstack = rstack.repeat(H, 1, 1, 1).reshape(H, H, L, N, S)
 
-                    # replace the upper triangle with zeros
-                    r, c = torch.triu_indices(H, H)
-                    rstack[r, c] = 0.0
+                # replace the upper triangle with zeros
+                r, c = torch.triu_indices(H, H)
+                rstack[r, c] = 0.0
 
-                    # replace diagonal rewards with values
-                    rstack[torch.arange(H), torch.arange(H)] = vstack[torch.arange(H)]
+                # replace diagonal rewards with values
+                rstack[torch.arange(H), torch.arange(H)] = vstack[torch.arange(H)]
 
-                    # clip the top row
-                    rstack = rstack[1:, :]
+                # clip the top row
+                rstack = rstack[1:, :]
 
-                    # occasionally dump table to screen for analysis
-                    if imagine_log_cooldown():
-                        rewards = rstack[-1:, :, 0, 0, 0].detach().cpu().numpy()
-                        scr.update_table(rewards, title='imagined rewards and values')
-                        v = vstack[:, 0, 0, 0].unsqueeze(0).detach().cpu().numpy()
-                        scr.update_table(v, h=2)
-                        imagined_trajectory = torch.stack(imagine)[:, 0, 0, :].detach().cpu().numpy().T
-                        scr.update_table(imagined_trajectory, h=3, title='imagined trajectory')
+                # occasionally dump table to screen for analysis
+                if imagine_log_cooldown():
+                    rewards = rstack[-1:, :, 0, 0, 0].detach().cpu().numpy()
+                    scr.update_table(rewards, title='imagined rewards and values')
+                    v = vstack[:, 0, 0, 0].unsqueeze(0).detach().cpu().numpy()
+                    scr.update_table(v, h=2)
+                    imagined_trajectory = torch.stack(imagine)[:, 0, 0, :].detach().cpu().numpy().T
+                    scr.update_table(imagined_trajectory, h=3, title='imagined trajectory')
 
-                    """ reduce the above matrix to values using the formula from the paper in 2 steps
-                    first, compute VN for each k by applying discounts to each time-step and compute the expected value
-                    """
+                """ reduce the above matrix to values using the formula from the paper in 2 steps
+                first, compute VN for each k by applying discounts to each time-step and compute the expected value
+                """
 
-                    # compute and apply the discount (alternatively can estimate the discount using a probability to terminate function)
-                    n = torch.linspace(0.0, H - 1, H, device=args.device)
-                    discount = torch.full_like(n, args.discount, device=args.device).pow(n).view(1, -1, 1, 1, 1)
-                    rstack = rstack * discount
+                # compute and apply the discount (alternatively can estimate the discount using a probability to terminate function)
+                n = torch.linspace(0.0, H - 1, H, device=args.device)
+                discount = torch.full_like(n, args.discount, device=args.device).pow(n).view(1, -1, 1, 1, 1)
+                rstack = rstack * discount
 
-                    # compute the expectation
-                    steps = torch.linspace(2, H, H - 1, device=args.device).view(-1, 1, 1, 1)
-                    VNK = rstack.sum(dim=1) / steps
+                # compute the expectation
+                steps = torch.linspace(2, H, H - 1, device=args.device).view(-1, 1, 1, 1)
+                VNK = rstack.sum(dim=1) / steps
 
-                    """ now we are left with a single column matrix in form
-                    VN(k=1)
-                    VN(k=2)
-                    VN(k=3)
-                    
-                    combine these into a single value with the V lambda equation
-                    
-                    VL = (1-lambda) * lambda ^ 0  * VN(k=1) + (1 - lambda) * lambda ^ 1 VN(k=2) + lambda ^ 2 * VN(k=3)
-                    
-                    Note the lambda terms should sum to 1, or you're doing it wrong
-                    """
+                """ now we are left with a single column matrix in form
+                VN(k=1)
+                VN(k=2)
+                VN(k=3)
+                
+                combine these into a single value with the V lambda equation
+                
+                VL = (1-lambda) * lambda ^ 0  * VN(k=1) + (1 - lambda) * lambda ^ 1 VN(k=2) + lambda ^ 2 * VN(k=3)
+                
+                Note the lambda terms should sum to 1, or you're doing it wrong
+                """
 
-                    lam = torch.full((VNK.size(0),), args.lam, device=args.device).pow(
-                        torch.arange(VNK.size(0), device=args.device)).view(-1, 1, 1, 1)
-                    lam[0:-1] = lam[0:-1] * (1 - args.lam)
-                    VL = (VNK * lam).sum(0)
+                lam = torch.full((VNK.size(0),), args.lam, device=args.device).pow(
+                    torch.arange(VNK.size(0), device=args.device)).view(-1, 1, 1, 1)
+                lam[0:-1] = lam[0:-1] * (1 - args.lam)
+                VL = (VNK * lam).sum(0)
 
-                    policy_optim.zero_grad(), value_optim.zero_grad()
-                    T_optim.zero_grad(), R_optim.zero_grad()  # , D_optim.zero_grad()
-                    # policy_loss = - VR.mean()
-                    policy_loss = -VL.mean()
-                    policy_loss.backward()
-                    policy_optim.step()
-                    scr.update_slot('policy_loss', f'Policy loss  {policy_loss.item()}')
-                    wandb.log({'policy_loss': policy_loss.item()})
+                policy_optim.zero_grad(), value_optim.zero_grad()
+                T_optim.zero_grad(), R_optim.zero_grad()  # , D_optim.zero_grad()
+                # policy_loss = - VR.mean()
+                policy_loss = -VL.mean()
+                policy_loss.backward()
+                policy_optim.step()
+                scr.update_slot('policy_loss', f'Policy loss  {policy_loss.item()}')
+                wandb.log({'policy_loss': policy_loss.item()})
 
-                    # regress against tau ie: the initial estimated value...
-                    policy_optim.zero_grad(), value_optim.zero_grad()
-                    T_optim.zero_grad(), R_optim.zero_grad()  # , D_optim.zero_grad()
+                # regress against tau ie: the initial estimated value...
+                policy_optim.zero_grad(), value_optim.zero_grad()
+                T_optim.zero_grad(), R_optim.zero_grad()  # , D_optim.zero_grad()
 
-                    VN = VL.detach().reshape(L * N, -1)
-                    values = value(trajectory.state.reshape(L * N, -1).to(args.device))
-                    value_loss = ((VN - values) ** 2).mean() / 2
-                    value_loss.backward()
-                    value_optim.step()
-                    scr.update_slot('value_loss', f'Value loss  {value_loss.item()}')
-                    wandb.log({'value_loss': value_loss.item()})
+                VN = VL.detach().reshape(L * N, -1)
+                values = value(trajectory.state.reshape(L * N, -1).to(args.device))
+                value_loss = ((VN - values) ** 2).mean() / 2
+                value_loss.backward()
+                value_optim.step()
+                scr.update_slot('value_loss', f'Value loss  {value_loss.item()}')
+                wandb.log({'value_loss': value_loss.item()})
 
-                with torch.no_grad():
-                    for i, speed in enumerate(speeds):
-                        theta = np.arange(0, np.pi * 2, 0.01, dtype=np.float32)[:, np.newaxis]
-                        x, y, thetadot = np.cos(theta), np.sin(theta), np.ones_like(theta) * speed
-                        plot_states = np.concatenate((x, y, thetadot), axis=1)
-                        plot_states = torch.from_numpy(plot_states).to(args.device)
-                        plot_v = value(plot_states)
-                        plot_v = plot_v.detach().cpu().numpy()
-                        speedlines[i].set_data(theta, plot_v)
+            with torch.no_grad():
+                for i, speed in enumerate(speeds):
+                    theta = np.arange(0, np.pi * 2, 0.01, dtype=np.float32)[:, np.newaxis]
+                    x, y, thetadot = np.cos(theta), np.sin(theta), np.ones_like(theta) * speed
+                    plot_states = np.concatenate((x, y, thetadot), axis=1)
+                    plot_states = torch.from_numpy(plot_states).to(args.device)
+                    plot_v = value(plot_states)
+                    plot_v = plot_v.detach().cpu().numpy()
+                    speedlines[i].set_data(theta, plot_v)
 
-                    polar.relim()
-                    polar.autoscale_view()
-                    fig.canvas.draw()
+                polar.relim()
+                polar.autoscale_view()
+                fig.canvas.draw()
 
         for _ in range(3):
             train_buff, reward = gather_experience(train_buff, train_episode, env, policy,
