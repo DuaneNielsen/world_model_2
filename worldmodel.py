@@ -1,5 +1,5 @@
 from types import SimpleNamespace
-from collections import deque, OrderedDict
+from collections import deque
 from statistics import mean
 from random import random
 import curses
@@ -7,18 +7,16 @@ import curses
 import torch
 import torch.nn as nn
 from torch.optim import Adam
-from torch.utils.data import DataLoader, WeightedRandomSampler, ConcatDataset
-import torch.nn.functional as F
-from torch.nn.utils import clip_grad_norm_
+from torch.utils.data import DataLoader, ConcatDataset
 import numpy as np
 import wandb
 import gym
 
-import matplotlib
 import matplotlib.pyplot as plt
 
 from distributions import TanhTransformedGaussian, ScaledTanhTransformedGaussian
-from wm2.data.datasets import Buffer, SARDataset, SARNextDataset, SDDataset
+from viz import Curses
+from wm2.data.datasets import Buffer, SARDataset, SARNextDataset
 from wm2.utils import Pbar
 from data.utils import pad_collate_2
 import wm2.utils
@@ -52,10 +50,8 @@ class LinEnv:
 def policy_prepro(state):
     return torch.tensor(state).float().to(args.device)
 
-
 def buffer_prepro(state):
     return state.astype(np.float32)
-
 
 def action_prepro(action):
     return np.array([action.item()], dtype=np.float32)
@@ -127,15 +123,14 @@ class Policy(nn.Module):
     def __init__(self, layers, min=-1.0, max=1.0):
         super().__init__()
         self.mu = MLP(layers)
-        self.scale = MLP(layers)
-        # self.scale = nn.Linear(state_dims, 1, bias=False)
+        #self.scale = nn.Linear(state_dims, 1, bias=False)
         self.min = min
         self.max = max
 
     def forward(self, state):
         mu = self.mu(state)
-        scale = torch.sigmoid(self.scale(state))
-        return ScaledTanhTransformedGaussian(mu, scale, min=self.min, max=self.max)
+        #scale = torch.sigmoid(self.scale(state))
+        return ScaledTanhTransformedGaussian(mu, 0.2, min=self.min, max=self.max)
 
 
 class TransitionModel(nn.Module):
@@ -161,108 +156,8 @@ def reward_mask_f(state, reward, action):
     return nonzero[:, np.newaxis]
 
 
-class DummyCurses:
-    """  Drop this in when you want to disable curses """
-    def __init__(self):
-        pass
-
-    def clear(self):
-        pass
-
-    def refresh(self):
-        pass
-
-    def update_slot(self, label, string):
-        pass
-
-    def update_progressbar(self, tics):
-        pass
-
-    def update_table(self, table, h=0, title=None):
-        pass
-
-
-class Curses:
-    def __init__(self):
-        self.stdscr = curses.initscr()
-
-        # Clear and refresh the screen for a blank canvas
-        self.stdscr.clear()
-        self.stdscr.refresh()
-
-        # Start colors in curses
-        curses.start_color()
-        curses.use_default_colors()
-        curses.use_default_colors()
-
-        curses.init_pair(1, 0, -1)  # slot text color
-        curses.init_pair(2, 139, -1)  # status bar color
-
-        self.height, self.width = self.stdscr.getmaxyx()
-
-        self.bar = OrderedDict()
-
-    def _resize(self):
-        resize = curses.is_term_resized(self.height, self.width)
-
-        # Action in loop if resize is True:
-        if resize is True:
-            self.height, self.width = self.stdscr.getmaxyx()
-            self.stdscr.clear()
-            curses.resizeterm(self.height, self.width)
-
-    def clear(self):
-        self.stdscr.clear()
-        self.height, self.width = self.stdscr.getmaxyx()
-
-    def refresh(self):
-        self._resize()
-        self.stdscr.refresh()
-
-    def update_slot(self, label, string):
-        self.bar[label] = string
-        slot = list(self.bar).index(label)
-        try:
-            self.stdscr.attron(curses.color_pair(1))
-            self.stdscr.addstr(self.height - slot - 2, 0, self.bar[label])
-            self.stdscr.addstr(self.height - slot - 2, len(self.bar[label]),
-                               " " * (self.width - len(self.bar[label]) - 1))
-            self.stdscr.attroff(curses.color_pair(1))
-            self.refresh()
-        except curses.error:
-            pass
-
-    def update_progressbar(self, tics):
-        try:
-            bar = '#' * tics
-            self.stdscr.attron(curses.color_pair(2))
-            self.stdscr.addstr(self.height - 1, 0, bar)
-            self.stdscr.addstr(self.height - 1, len(bar), " " * (self.width - len(bar) - 1))
-            self.stdscr.attroff(curses.color_pair(2))
-            self.refresh()
-        except curses.error:
-            pass
-
-    def _write_row(self, str, h=0, w=0, color_pair=0):
-        try:
-            self.stdscr.attron(curses.color_pair(color_pair))
-            self.stdscr.addstr(h, 0, str)
-            self.stdscr.addstr(h, len(str), " " * (self.width - len(str) - 1))
-            self.stdscr.attroff(curses.color_pair(color_pair))
-        except curses.error:
-            pass
-
-    def update_table(self, table, h=0, title=None):
-        assert len(table.shape) == 2
-        if title is not None:
-            self._write_row(title, h=h)
-            h = h + 1
-        for i in range(table.shape[0]):
-            table_str = np.array2string(table[i], max_line_width=self.width)
-            self._write_row(table_str, i + h)
-        self.refresh()
-
 def main(args):
+
     # curses
     scr = Curses()
 
@@ -288,25 +183,10 @@ def main(args):
     polar.relim()
     polar.autoscale_view()
     fig.canvas.draw()
-
     # polar.set_rmax(2)
     # polar.set_rticks([0.5, 1, 1.5, 2])  # Less radial ticks
     # polar.set_rlabel_position(-22.5)  # Move radial labels away from plotted line
 
-
-
-    # ax1 = fig.add_subplot(221)
-    # ax2 = fig.add_subplot(222)
-    # ax3 = fig.add_subplot(223)
-    # ax4 = fig.add_subplot(224)
-    # s = torch.linspace(-2.5, 2.5, 20).view(-1, 1)
-    # z = torch.zeros(20, 1)
-    # l_actions, = ax1.plot(s, z, 'b-', label='policy(state)')
-    # l_rewards, = ax2.plot(s, z, 'b-', label='reward(state)')
-    # l_next_state_0_2, = ax3.plot(s, z, 'b-', label='T(state,0.2)')
-    # l_next_state_minus_0_2, = ax3.plot(s, z, 'r-', label='T(state,-0.2)')
-    # l_value, = ax4.plot(s, z, 'b-', label='value(state)')
-    # ax1.legend(), ax2.legend(), ax3.legend(), ax4.legend()
 
     # environment
     # env = LinEnv()
@@ -317,11 +197,6 @@ def main(args):
     train_episode, test_episode = args.seed_episodes, args.seed_episodes
 
     eps = 0.05
-
-    # # representation model
-    # REPR = TransitionModel(input_dim=args.state_dims + args.action_dims,
-    #                        hidden_dim=3, output_dim=args.state_dims,
-    #                        layers=args.transition_layers).to(args.device)
 
     # policy model
     policy = Policy(layers=[args.state_dims, *args.policy_hidden_dims, 1], min=-2.0, max=2.0).to(args.device)
@@ -363,9 +238,6 @@ def main(args):
             train, test = SARNextDataset(train_buff, mask_f=None), SARNextDataset(test_buff, mask_f=None)
             train = DataLoader(train, batch_size=args.batch_size, collate_fn=pad_collate_2, shuffle=True)
             test = DataLoader(test, batch_size=args.batch_size, collate_fn=pad_collate_2, shuffle=True)
-            # pbar = Pbar(items_to_process=args.trajectories_per_pass, train_len=len(train), batch_size=args.batch_size,
-            #             label='transition')
-            # while pbar.items_processed < args.trajectories_per_pass:
 
             for _ in range(1):
 
@@ -381,7 +253,6 @@ def main(args):
                     T_optim.step()
                     scr.update_slot('transition_train', f'Transition training loss {loss.item()}')
                     wandb.log({'transition_train': loss.item()})
-                    # pbar.update_train_loss_and_checkpoint(loss, models={'transition': T}, optimizer=T_optim)
 
                 for trajectories in test:
                     input = torch.cat((trajectories.state, trajectories.action), dim=2).to(args.device)
@@ -399,29 +270,21 @@ def main(args):
                         scr.update_table(trajectories.action[10:20, 0, :].detach().cpu().numpy().T, h=16,
                                          title='action')
 
-                    # pbar.update_test_loss_and_save_model(loss, models={'transition': T})
-            # pbar.close()
-
             # Reward learning
             # train, test = SARDataset(train_buff, mask_f=reward_mask_f), SARDataset(test_buff, mask_f=reward_mask_f)
             train, test = SARDataset(train_buff), SARDataset(test_buff)
             train = DataLoader(train, batch_size=args.batch_size, collate_fn=pad_collate_2, shuffle=True)
             test = DataLoader(test, batch_size=args.batch_size, collate_fn=pad_collate_2, shuffle=True)
-            # pbar = Pbar(items_to_process=args.trajectories_per_pass, train_len=len(train),
-            #             batch_size=args.batch_size, label='reward')
-            # while pbar.items_processed < args.trajectories_per_pass:
             for _ in range(1):
                 for trajectories in train:
                     R_optim.zero_grad()
                     predicted_reward = R(trajectories.state.to(args.device))
                     loss = (((trajectories.reward.to(args.device) - predicted_reward) * trajectories.pad.to(
                         args.device)) ** 2).mean()
-                    # loss = ((trajectory.reward.to(args.device) - predicted_reward) ** 2).mean()
                     loss.backward()
                     R_optim.step()
                     scr.update_slot('reward_train', f'Reward train loss {loss.item()}')
                     wandb.log({'reward_train': loss.item()})
-                    # pbar.update_train_loss_and_checkpoint(loss)
 
                 for trajectories in test:
                     predicted_reward = R(trajectories.state.to(args.device))
@@ -429,9 +292,6 @@ def main(args):
                         args.device)) ** 2).mean()
                     scr.update_slot('reward_test', f'Reward test loss  {loss.item()}')
                     wandb.log({'reward_test': loss.item()})
-                    # loss = ((trajectory.reward.to(args.device) - predicted_reward) ** 2).mean()
-                    # pbar.update_test_loss_and_save_model(loss)
-            # pbar.close()
 
             # Terminal state learning
             # train, test = SDDataset(train_buff), SDDataset(test_buff)
@@ -440,8 +300,7 @@ def main(args):
             # test_sampler = WeightedRandomSampler(test_weights, len(test_weights))
             # train = DataLoader(train, batch_size=32, sampler=train_sampler, drop_last=False)
             # test = DataLoader(test, batch_size=32, sampler=test_sampler, drop_last=False)
-            # pbar = Pbar(items_to_process=len(train) * 2, train_len=len(train),
-            #             batch_size=args.batch_size, label='terminal')
+
             # while pbar.items_processed < len(train) * 2:
             #
             #     for state, done in train:
@@ -450,54 +309,25 @@ def main(args):
             #         loss = F.binary_cross_entropy_with_logits(predicted_done, done)
             #         loss.backward()
             #         D_optim.step()
-            #         pbar.update_train_loss_and_checkpoint(loss)
             #
             #     for state, done in test:
             #         predicted_done = D(state)
             #         loss = F.binary_cross_entropy_with_logits(predicted_done, done)
-            #         pbar.update_test_loss_and_save_model(loss)
-            #
-            # pbar.close()
 
             # Behaviour learning
             train = ConcatDataset([SARDataset(train_buff)])
             train = DataLoader(train, batch_size=args.batch_size, collate_fn=pad_collate_2, shuffle=True)
-            # pbar = Pbar(items_to_process=args.trajectories_per_pass, train_len=len(train),
-            #             batch_size=args.batch_size, label='behavior')
 
-            # while pbar.items_processed < 10:
             for _ in range(1):
-
-                for trajectories in train:
-
-                    # compute the cell values for the sampled trajectory
-                    h, c = None, None
-                    with torch.no_grad():
-                        s_traj, h_traj, c_traj = [], [], []
-                        h_shape = args.transition_layers, trajectories.state.size(1), args.transition_hidden_dim
-                        h, c = torch.zeros(h_shape, device=args.device), torch.zeros(h_shape, device=args.device)
-
-                        for state, action in zip(trajectories.state, trajectories.action):
-                            if action.max() > 2.0 or action.min() < -2.0:
-                                print(f'imaginination {action.max()} {action.min()}')
-                            h_traj.append(h)
-                            c_traj.append(c)
-                            s = torch.cat((state, action), dim=1).to(args.device).unsqueeze(0)
-                            s_traj.append(s)
-                            s, (h, c) = T(s, (h, c))
-
-                        h = torch.cat(h_traj, dim=1)
-                        c = torch.cat(c_traj, dim=1)
-                        s = torch.cat(s_traj, dim=1)
-
-                    imagine = [s]
-                    reward = [R(s[:, :, :-args.action_dims])]
-                    # done = [D(trajectory.state.to(args.device))]
-                    v = [value(s[:, :, :-args.action_dims])]
+                for trajectory in train:
+                    imagine = [torch.cat((trajectory.state, trajectory.action), dim=2).to(args.device)]
+                    reward = [R(trajectory.state.to(args.device))]
+                    #done = [D(trajectory.state.to(args.device))]
+                    v = [value(trajectory.state.to(args.device))]
 
                     # imagine forward here
                     for tau in range(args.horizon):
-                        state, (h, c) = T(imagine[tau], (h, c))
+                        state, (h, c) = T(imagine[tau])
                         action = policy(state).rsample()
                         reward += [R(state)]
                         # done += [D(state)]
@@ -540,9 +370,6 @@ def main(args):
                         imagined_trajectory = torch.stack(imagine)[:, 0, 0, :].detach().cpu().numpy().T
                         scr.update_table(imagined_trajectory, h=3, title='imagined trajectory')
 
-                        # t = wandb.Table(data=)
-                        # wandb.log({'imagination': t})
-
                     """ reduce the above matrix to values using the formula from the paper in 2 steps
                     first, compute VN for each k by applying discounts to each time-step and compute the expected value
                     """
@@ -578,7 +405,6 @@ def main(args):
                     # policy_loss = - VR.mean()
                     policy_loss = -VL.mean()
                     policy_loss.backward()
-                    clip_grad_norm_(parameters=policy.parameters(), max_norm=100.0)
                     policy_optim.step()
                     scr.update_slot('policy_loss', f'Policy loss  {policy_loss.item()}')
                     wandb.log({'policy_loss': policy_loss.item()})
@@ -588,16 +414,12 @@ def main(args):
                     T_optim.zero_grad(), R_optim.zero_grad()  # , D_optim.zero_grad()
 
                     VN = VL.detach().reshape(L * N, -1)
-                    values = value(trajectories.state.reshape(L * N, -1).to(args.device))
+                    values = value(trajectory.state.reshape(L * N, -1).to(args.device))
                     value_loss = ((VN - values) ** 2).mean() / 2
                     value_loss.backward()
-                    clip_grad_norm_(parameters=value.parameters(), max_norm=100.0)
                     value_optim.step()
                     scr.update_slot('value_loss', f'Value loss  {value_loss.item()}')
                     wandb.log({'value_loss': value_loss.item()})
-
-                    # pbar.update_train_loss_and_checkpoint(policy_loss, models={'policy': policy},
-                    #                                                          optimizer=policy_optim)
 
                 with torch.no_grad():
                     for i, speed in enumerate(speeds):
@@ -609,13 +431,9 @@ def main(args):
                         plot_v = plot_v.detach().cpu().numpy()
                         speedlines[i].set_data(theta, plot_v)
 
-                    #polar.plot(np.squeeze(theta), plot_v)
-
                     polar.relim()
                     polar.autoscale_view()
                     fig.canvas.draw()
-
-            # pbar.close()
 
         for _ in range(3):
             train_buff, reward = gather_experience(train_buff, train_episode, env, policy,
@@ -639,23 +457,6 @@ def main(args):
         # s_minus_0_2 = torch.cat((s.view(1, -1, 1), torch.full((1, 20, 1), -0.2)), dim=2)
         # next_state_0_2, hidden = T(s_0_2)
         # next_state_minus_0_2, hidden = T(s_minus_0_2)
-        #
-        # l_actions.set_ydata(a.detach().cpu().numpy())
-        # l_rewards.set_ydata(r.detach().cpu().numpy())
-        # l_next_state_0_2.set_ydata(next_state_0_2.detach().cpu().numpy())
-        # l_next_state_minus_0_2.set_ydata(next_state_minus_0_2.detach().cpu().numpy())
-        # l_value.set_ydata(v.detach().cpu().numpy())
-        #
-        # ax1.relim()
-        # ax1.autoscale_view()
-        # ax2.relim()
-        # ax2.autoscale_view()
-        # ax3.relim()
-        # ax3.autoscale_view()
-        # ax4.relim()
-        # ax4.autoscale_view()
-        #
-
 
         if random() < 1.1:
             test_buff, reward = gather_experience(test_buff, test_episode, env, policy,
@@ -674,7 +475,7 @@ def main(args):
 if __name__ == '__main__':
     args = {'seed_episodes': 40,
             'collect_interval': 10,
-            'batch_size': 16,
+            'batch_size': 8,
             'device': 'cuda:0',
             'horizon': 15,
             'discount': 0.99,

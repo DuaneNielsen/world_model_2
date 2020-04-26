@@ -1,3 +1,7 @@
+import curses
+from collections import OrderedDict
+
+from matplotlib import pyplot as plt
 from time import sleep
 
 from math import floor
@@ -116,3 +120,140 @@ def display_predictions(trajectory_mu, trajectory_stdev=None, trajectory_covar=N
 
             except RuntimeError:
                 print('Runtime Error')
+
+
+class DummyCurses:
+    """  Drop this in when you want to disable curses """
+    def __init__(self):
+        pass
+
+    def clear(self):
+        pass
+
+    def refresh(self):
+        pass
+
+    def update_slot(self, label, string):
+        pass
+
+    def update_progressbar(self, tics):
+        pass
+
+    def update_table(self, table, h=0, title=None):
+        pass
+
+
+class Curses:
+    def __init__(self):
+        self.stdscr = curses.initscr()
+
+        # Clear and refresh the screen for a blank canvas
+        self.stdscr.clear()
+        self.stdscr.refresh()
+
+        # Start colors in curses
+        curses.start_color()
+        curses.use_default_colors()
+
+        curses.init_pair(1, 0, -1)  # slot text color
+        curses.init_pair(2, 139, -1)  # status bar color
+
+        self.height, self.width = self.stdscr.getmaxyx()
+
+        self.bar = OrderedDict()
+
+    def _resize(self):
+        resize = curses.is_term_resized(self.height, self.width)
+
+        # Action in loop if resize is True:
+        if resize is True:
+            self.height, self.width = self.stdscr.getmaxyx()
+            self.stdscr.clear()
+            curses.resizeterm(self.height, self.width)
+
+    def clear(self):
+        self.stdscr.clear()
+        self.height, self.width = self.stdscr.getmaxyx()
+
+    def refresh(self):
+        self._resize()
+        self.stdscr.refresh()
+
+    def update_slot(self, label, string):
+        self.bar[label] = string
+        slot = list(self.bar).index(label)
+        try:
+            self.stdscr.attron(curses.color_pair(1))
+            self.stdscr.addstr(self.height - slot - 2, 0, self.bar[label])
+            self.stdscr.addstr(self.height - slot - 2, len(self.bar[label]),
+                               " " * (self.width - len(self.bar[label]) - 1))
+            self.stdscr.attroff(curses.color_pair(1))
+            self.refresh()
+        except curses.error:
+            pass
+
+    def update_progressbar(self, tics):
+        try:
+            bar = '#' * tics
+            self.stdscr.attron(curses.color_pair(2))
+            self.stdscr.addstr(self.height - 1, 0, bar)
+            self.stdscr.addstr(self.height - 1, len(bar), " " * (self.width - len(bar) - 1))
+            self.stdscr.attroff(curses.color_pair(2))
+            self.refresh()
+        except curses.error:
+            pass
+
+    def _write_row(self, str, h=0, w=0, color_pair=0):
+        try:
+            self.stdscr.attron(curses.color_pair(color_pair))
+            self.stdscr.addstr(h, 0, str)
+            self.stdscr.addstr(h, len(str), " " * (self.width - len(str) - 1))
+            self.stdscr.attroff(curses.color_pair(color_pair))
+        except curses.error:
+            pass
+
+    def update_table(self, table, h=0, title=None):
+        assert len(table.shape) == 2
+        if title is not None:
+            self._write_row(title, h=h)
+            h = h + 1
+        for i in range(table.shape[0]):
+            table_str = np.array2string(table[i], max_line_width=self.width)
+            self._write_row(table_str, i + h)
+        self.refresh()
+
+
+class LineViz:
+    def __init__(self):
+        plt.ion()
+        self.fig = plt.figure(num=None, figsize=(16, 12), dpi=80, facecolor='w', edgecolor='k')
+        self.ax1 = self.fig.add_subplot(221)
+        self.ax2 = self.fig.add_subplot(222)
+        self.ax3 = self.fig.add_subplot(223)
+        self.ax4 = self.fig.add_subplot(224)
+        s = torch.linspace(-2.5, 2.5, 20).view(-1, 1)
+        z = torch.zeros(20, 1)
+        self.l_actions, = self.ax1.plot(s, z, 'b-', label='policy(state)')
+        self.l_rewards, = self.ax2.plot(s, z, 'b-', label='reward(state)')
+        self.l_next_state_0_2, = self.ax3.plot(s, z, 'b-', label='T(state,0.2)')
+        self.l_next_state_minus_0_2, = self.ax3.plot(s, z, 'r-', label='T(state,-0.2)')
+        self.l_value, = self.ax4.plot(s, z, 'b-', label='value(state)')
+        self.ax1.legend(), self.ax2.legend(), self.ax3.legend(), self.ax4.legend()
+
+    def update(self, next_state_0_2, next_state_minus_0_2, a, r):
+
+        self.l_actions.set_ydata(a.detach().cpu().numpy())
+        self.l_rewards.set_ydata(r.detach().cpu().numpy())
+        self.l_next_state_0_2.set_ydata(next_state_0_2.detach().cpu().numpy())
+        self.l_next_state_minus_0_2.set_ydata(next_state_minus_0_2.detach().cpu().numpy())
+        self.l_value.set_ydata(v.detach().cpu().numpy())
+
+        self.ax1.relim()
+        self.ax1.autoscale_view()
+        self.ax2.relim()
+        self.ax2.autoscale_view()
+        self.ax3.relim()
+        self.ax3.autoscale_view()
+        self.ax4.relim()
+        self.ax4.autoscale_view()
+        self.fig.canvas.draw()
