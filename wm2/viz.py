@@ -240,7 +240,16 @@ class LineViz:
         self.l_value, = self.ax4.plot(s, z, 'b-', label='value(state)')
         self.ax1.legend(), self.ax2.legend(), self.ax3.legend(), self.ax4.legend()
 
-    def update(self, next_state_0_2, next_state_minus_0_2, a, r):
+    def update(self, s, policy, R, value):
+
+        a = policy.mu(s)
+        r = R(s)
+        v = value(s)
+
+        s_0_2 = torch.cat((s.view(1, -1, 1), torch.full((1, 20, 1), 0.2)), dim=2)
+        s_minus_0_2 = torch.cat((s.view(1, -1, 1), torch.full((1, 20, 1), -0.2)), dim=2)
+        next_state_0_2, hidden = T(s_0_2)
+        next_state_minus_0_2, hidden = T(s_minus_0_2)
 
         self.l_actions.set_ydata(a.detach().cpu().numpy())
         self.l_rewards.set_ydata(r.detach().cpu().numpy())

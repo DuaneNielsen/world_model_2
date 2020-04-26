@@ -19,12 +19,10 @@ class Buffer:
         self.rewards_count = 0
         self.done_count = 0
         self.steps_count = 0
-        self.action_max = 0
+        #self.action_max = 0
 
     def append(self, traj_id, state, action, reward, done, info):
         """subclass and override this method to get different buffer write behavior"""
-        if action > 2.0 or action < -2.0:
-            print(f'buffer {action}')
         self._append(traj_id, state, action, reward, done, info)
 
     def _append(self, traj_id, state, action, reward, done, info):
@@ -39,8 +37,8 @@ class Buffer:
             self.rewards_count += 1
         if done:
             self.done_count += 1
-        if action > self.action_max:
-            self.action_max = action
+        # if action > self.action_max:
+        #     self.action_max = action
 
     def get_step(self, item):
         traj_id, step_id = self.index[item]
@@ -98,14 +96,12 @@ class SARDataset(Dataset):
         for step in trajectory:
             state += [step.state]
             reward += [step.reward]
-            if isinstance(step.action, int):
-                action += [one_hot(step.action, self.b.action_max)]
-            else:
-                action += [step.action]
+            # if isinstance(step.action, int):
+            #     action += [one_hot(step.action, self.b.action_max)]
+            # else:
+            action += [step.action]
 
         astack = np.stack(action)
-        if astack.max() > 2.0 or astack.min() < -2.0:
-            print(f'SARDataset {astack.max()} {astack.min()}')
 
         return {'state': np.stack(state),
                 'action': astack,

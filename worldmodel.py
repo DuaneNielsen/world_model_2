@@ -47,22 +47,52 @@ class LinEnv:
             return pos, 0.0, False
 
 
-def policy_prepro(state):
-    return torch.tensor(state).float().to(args.device)
+class PendulumConnector:
 
-def buffer_prepro(state):
-    return state.astype(np.float32)
+    @staticmethod
+    def policy_prepro(state):
+        return torch.tensor(state).float().to(args.device)
 
-def action_prepro(action):
-    return np.array([action.item()], dtype=np.float32)
+    @staticmethod
+    def buffer_prepro(state):
+        return state.astype(np.float32)
+
+    @staticmethod
+    def random_policy(state):
+        return TanhTransformedGaussian(0.0, 0.5)
+
+    @staticmethod
+    def reward_prepro(reward):
+        return np.array([reward], dtype=np.float32)
+
+    @staticmethod
+    def action_prepro(action):
+        return np.array([action.item()], dtype=np.float32)
 
 
-def reward_prepro(reward):
-    return np.array([reward], dtype=np.float32)
+class LunarLanderConnector:
 
+    @staticmethod
+    def policy_prepro(state):
+        return torch.tensor(state).float().to(args.device)
 
-def random_policy(state):
-    return TanhTransformedGaussian(0.0, 0.5)
+    @staticmethod
+    def buffer_prepro(state):
+        return state.astype(np.float32)
+
+    @staticmethod
+    def reward_prepro(reward):
+        return np.array([reward], dtype=np.float32)
+
+    @staticmethod
+    def action_prepro(action):
+        return action.detach().cpu().squeeze().numpy().astype(np.float32)
+
+    @staticmethod
+    def random_policy(state):
+        mu = torch.zeros((2,))
+        scale = torch.full((2,), 0.5)
+        return ScaledTanhTransformedGaussian(mu, scale)
 
 
 def gather_experience(buff, episode, env, policy, eps=0.0, eps_policy=None, render=True):
@@ -71,11 +101,11 @@ def gather_experience(buff, episode, env, policy, eps=0.0, eps_policy=None, rend
         episode_reward = 0.0
         state, reward, done = env.reset(), 0.0, False
         if random() >= eps:
-            action = policy(policy_prepro(state).unsqueeze(0)).rsample()
+            action = policy(env.connector.policy_prepro(state).unsqueeze(0)).rsample()
         else:
-            action = eps_policy(policy_prepro(state).unsqueeze(0)).rsample()
-        action = action_prepro(action)
-        buff.append(episode, buffer_prepro(state), action, reward_prepro(reward), done, None)
+            action = eps_policy(env.connector.policy_prepro(state).unsqueeze(0)).rsample()
+        action = env.connector.action_prepro(action)
+        buff.append(episode, env.connector.buffer_prepro(state), action, env.connector.reward_prepro(reward), done, None)
         episode_reward += reward
         if render:
             env.render()
@@ -83,11 +113,11 @@ def gather_experience(buff, episode, env, policy, eps=0.0, eps_policy=None, rend
             state, reward, done, info = env.step(action)
             episode_reward += reward
             if random() >= eps:
-                action = policy(policy_prepro(state).unsqueeze(0)).rsample()
+                action = policy(env.connector.policy_prepro(state).unsqueeze(0)).rsample()
             else:
-                action = eps_policy(policy_prepro(state).unsqueeze(0)).rsample()
-            action = action_prepro(action)
-            buff.append(episode, buffer_prepro(state), action, reward_prepro(reward), done, None)
+                action = eps_policy(env.connector.policy_prepro(state).unsqueeze(0)).rsample()
+            action = env.connector.action_prepro(action)
+            buff.append(episode, env.connector.buffer_prepro(state), action, env.connector.reward_prepro(reward), done, None)
             if render:
                 env.render()
     return buff, episode_reward
@@ -96,7 +126,7 @@ def gather_experience(buff, episode, env, policy, eps=0.0, eps_policy=None, rend
 def gather_seed_episodes(env, seed_episodes):
     buff = Buffer()
     for episode in range(seed_episodes):
-        gather_experience(buff, episode, env, random_policy, render=False)
+        gather_experience(buff, episode, env, env.connector.random_policy, render=False)
     return buff
 
 
@@ -156,6 +186,44 @@ def reward_mask_f(state, reward, action):
     return nonzero[:, np.newaxis]
 
 
+class PendulumViz:
+    def __init__(self):
+        # visualization
+        plt.ion()
+        self.fig = plt.figure(num=None, figsize=(16, 12), dpi=80, facecolor='w', edgecolor='k')
+        self.polar = self.fig.add_subplot(111, projection='polar')
+        self.theta = np.arange(0, np.pi * 2, 0.01, dtype=np.float32)[:, np.newaxis]
+        self.speeds = np.linspace(-8.0, 8.0, 7, dtype=np.float32)
+        self.speedlines = []
+        for speed in self.speeds:
+            self.speedlines += self.polar.plot(self.theta, np.ones_like(self.theta), label=f'{speed.item()}')
+        self.polar.grid(True)
+        self.polar.legend()
+        self.polar.set_theta_zero_location("N")
+        self.polar.relim()
+        self.polar.autoscale_view()
+        self.fig.canvas.draw()
+
+        # self.polar.set_rmax(2)
+        # self.polar.set_rticks([0.5, 1, 1.5, 2])  # Less radial ticks
+        # self.polar.set_rlabel_position(-22.5)  # Move radial labels away from plotted line
+
+    def plot_value(self, value):
+        with torch.no_grad():
+            for i, speed in enumerate(self.speeds):
+                theta = np.arange(0, np.pi * 2, 0.01, dtype=np.float32)[:, np.newaxis]
+                x, y, thetadot = np.cos(theta), np.sin(theta), np.ones_like(theta) * speed
+                plot_states = np.concatenate((x, y, thetadot), axis=1)
+                plot_states = torch.from_numpy(plot_states).to(args.device)
+                plot_v = value(plot_states)
+                plot_v = plot_v.detach().cpu().numpy()
+                self.speedlines[i].set_data(theta, plot_v)
+
+            self.polar.relim()
+            self.polar.autoscale_view()
+            self.fig.canvas.draw()
+
+
 def main(args):
 
     # curses
@@ -167,31 +235,18 @@ def main(args):
     imagine_log_cooldown = wm2.utils.Cooldown(secs=30)
     transition_log_cooldown = wm2.utils.Cooldown(secs=30)
 
-    # visualization
-    plt.ion()
-    # fig = plt.figure(num=None, figsize=(16, 12), dpi=80, facecolor='w', edgecolor='k')
-    fig = plt.figure(num=None, figsize=(16, 12), dpi=80, facecolor='w', edgecolor='k')
-    polar = fig.add_subplot(111, projection='polar')
-    theta = np.arange(0, np.pi * 2, 0.01, dtype=np.float32)[:, np.newaxis]
-    speeds = np.linspace(-8.0, 8.0, 7, dtype=np.float32)
-    speedlines = []
-    for speed in speeds:
-        speedlines += polar.plot(theta, np.ones_like(theta), label=f'{speed.item()}')
-    polar.grid(True)
-    polar.legend()
-    polar.set_theta_zero_location("N")
-    polar.relim()
-    polar.autoscale_view()
-    fig.canvas.draw()
-    # polar.set_rmax(2)
-    # polar.set_rticks([0.5, 1, 1.5, 2])  # Less radial ticks
-    # polar.set_rlabel_position(-22.5)  # Move radial labels away from plotted line
-
 
     # environment
     # env = LinEnv()
-    env = gym.make('Pendulum-v0')
-    # env = gym.make('MountainCarContinuous-v0')
+    # env = gym.make('Pendulum-v0')
+    env = gym.make('LunarLanderContinuous-v2')
+    env.connector = LunarLanderConnector
+
+    args.state_dims = env.observation_space.shape[0]
+    args.action_dims = env.action_space.shape[0]
+    args.action_min = -1.0
+    args.action_max = 1.0
+
     train_buff = gather_seed_episodes(env, args.seed_episodes)
     test_buff = gather_seed_episodes(env, args.seed_episodes)
     train_episode, test_episode = args.seed_episodes, args.seed_episodes
@@ -199,7 +254,7 @@ def main(args):
     eps = 0.05
 
     # policy model
-    policy = Policy(layers=[args.state_dims, *args.policy_hidden_dims, 1], min=-2.0, max=2.0).to(args.device)
+    policy = Policy(layers=[args.state_dims, *args.policy_hidden_dims, args.action_dims], min=args.action_min, max=args.action_max).to(args.device)
     policy_optim = Adam(policy.parameters(), lr=args.lr)
 
     # value model
@@ -417,23 +472,9 @@ def main(args):
                 scr.update_slot('value_loss', f'Value loss  {value_loss.item()}')
                 wandb.log({'value_loss': value_loss.item()})
 
-            with torch.no_grad():
-                for i, speed in enumerate(speeds):
-                    theta = np.arange(0, np.pi * 2, 0.01, dtype=np.float32)[:, np.newaxis]
-                    x, y, thetadot = np.cos(theta), np.sin(theta), np.ones_like(theta) * speed
-                    plot_states = np.concatenate((x, y, thetadot), axis=1)
-                    plot_states = torch.from_numpy(plot_states).to(args.device)
-                    plot_v = value(plot_states)
-                    plot_v = plot_v.detach().cpu().numpy()
-                    speedlines[i].set_data(theta, plot_v)
-
-                polar.relim()
-                polar.autoscale_view()
-                fig.canvas.draw()
-
         for _ in range(3):
             train_buff, reward = gather_experience(train_buff, train_episode, env, policy,
-                                                  eps=eps, eps_policy=random_policy)
+                                                  eps=eps, eps_policy=env.connector.random_policy)
             train_episode += 1
 
             wandb.log({'reward': reward})
@@ -445,18 +486,9 @@ def main(args):
                 rr += f' {reward:.5f},'
             scr.update_slot('recent_rewards', 'Recent rewards: ' + rr)
 
-        # a = policy.mu(s)
-        # r = R(s)
-        # v = value(s)
-        #
-        # s_0_2 = torch.cat((s.view(1, -1, 1), torch.full((1, 20, 1), 0.2)), dim=2)
-        # s_minus_0_2 = torch.cat((s.view(1, -1, 1), torch.full((1, 20, 1), -0.2)), dim=2)
-        # next_state_0_2, hidden = T(s_0_2)
-        # next_state_minus_0_2, hidden = T(s_minus_0_2)
-
         if random() < 1.1:
             test_buff, reward = gather_experience(test_buff, test_episode, env, policy,
-                                                  eps=eps, eps_policy=random_policy)
+                                                  eps=eps, eps_policy=env.connector.random_policy)
             test_episode += 1
 
         # boost or decrease exploration if no reward
@@ -477,12 +509,10 @@ if __name__ == '__main__':
             'discount': 0.99,
             'lam': 0.95,
             'lr': 1e-3,
-            'state_dims': 3,
             'policy_hidden_dims': [300],
             'value_hidden_dims': [300],
             'reward_hidden_dims': [300, 300],
             'nonlin': 'nn.ELU',
-            'action_dims': 1,
             'transition_layers': 2,
             'transition_hidden_dim': 32
             }
