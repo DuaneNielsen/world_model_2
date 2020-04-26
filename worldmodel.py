@@ -127,14 +127,15 @@ class Policy(nn.Module):
     def __init__(self, layers, min=-1.0, max=1.0):
         super().__init__()
         self.mu = MLP(layers)
+        self.scale = MLP(layers)
         # self.scale = nn.Linear(state_dims, 1, bias=False)
         self.min = min
         self.max = max
 
     def forward(self, state):
         mu = self.mu(state)
-        # scale = torch.sigmoid(self.scale(state))
-        return ScaledTanhTransformedGaussian(mu, 0.2, min=self.min, max=self.max)
+        scale = torch.sigmoid(self.scale(state))
+        return ScaledTanhTransformedGaussian(mu, scale, min=self.min, max=self.max)
 
 
 class TransitionModel(nn.Module):
@@ -191,6 +192,7 @@ class Curses:
 
         # Start colors in curses
         curses.start_color()
+        curses.use_default_colors()
         curses.use_default_colors()
 
         curses.init_pair(1, 0, -1)  # slot text color
@@ -260,7 +262,6 @@ class Curses:
             self._write_row(table_str, i + h)
         self.refresh()
 
-
 def main(args):
     # curses
     scr = Curses()
@@ -272,8 +273,27 @@ def main(args):
     transition_log_cooldown = wm2.utils.Cooldown(secs=30)
 
     # visualization
-    # plt.ion()
+    plt.ion()
     # fig = plt.figure(num=None, figsize=(16, 12), dpi=80, facecolor='w', edgecolor='k')
+    fig = plt.figure(num=None, figsize=(16, 12), dpi=80, facecolor='w', edgecolor='k')
+    polar = fig.add_subplot(111, projection='polar')
+    theta = np.arange(0, np.pi * 2, 0.01, dtype=np.float32)[:, np.newaxis]
+    speeds = np.linspace(-8.0, 8.0, 7, dtype=np.float32)
+    speedlines = []
+    for speed in speeds:
+        speedlines += polar.plot(theta, np.ones_like(theta), label=f'{speed.item()}')
+    polar.grid(True)
+    polar.legend()
+    polar.set_theta_zero_location("N")
+
+    # polar.set_rmax(2)
+    # polar.set_rticks([0.5, 1, 1.5, 2])  # Less radial ticks
+    # polar.set_rlabel_position(-22.5)  # Move radial labels away from plotted line
+    polar.relim()
+    polar.autoscale_view()
+    fig.canvas.draw()
+
+
     # ax1 = fig.add_subplot(221)
     # ax2 = fig.add_subplot(222)
     # ax3 = fig.add_subplot(223)
@@ -578,6 +598,22 @@ def main(args):
                     # pbar.update_train_loss_and_checkpoint(policy_loss, models={'policy': policy},
                     #                                                          optimizer=policy_optim)
 
+                with torch.no_grad():
+                    for i, speed in enumerate(speeds):
+                        theta = np.arange(0, np.pi * 2, 0.01, dtype=np.float32)[:, np.newaxis]
+                        x, y, thetadot = np.cos(theta), np.sin(theta), np.ones_like(theta) * speed
+                        plot_states = np.concatenate((x, y, thetadot), axis=1)
+                        plot_states = torch.from_numpy(plot_states).to(args.device)
+                        plot_v = value(plot_states)
+                        plot_v = plot_v.detach().cpu().numpy()
+                        speedlines[i].set_data(theta, plot_v)
+
+                    #polar.plot(np.squeeze(theta), plot_v)
+
+                    polar.relim()
+                    polar.autoscale_view()
+                    fig.canvas.draw()
+
             # pbar.close()
 
         for _ in range(3):
@@ -618,7 +654,7 @@ def main(args):
         # ax4.relim()
         # ax4.autoscale_view()
         #
-        # fig.canvas.draw()
+
 
         if random() < 1.1:
             test_buff, reward = gather_experience(test_buff, test_episode, env, policy,
@@ -637,7 +673,7 @@ def main(args):
 if __name__ == '__main__':
     args = {'seed_episodes': 40,
             'collect_interval': 10,
-            'batch_size': 1,
+            'batch_size': 16,
             'device': 'cuda:0',
             'horizon': 15,
             'discount': 0.99,
