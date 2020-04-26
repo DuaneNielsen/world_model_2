@@ -285,13 +285,14 @@ def main(args):
     polar.grid(True)
     polar.legend()
     polar.set_theta_zero_location("N")
+    polar.relim()
+    polar.autoscale_view()
+    fig.canvas.draw()
 
     # polar.set_rmax(2)
     # polar.set_rticks([0.5, 1, 1.5, 2])  # Less radial ticks
     # polar.set_rlabel_position(-22.5)  # Move radial labels away from plotted line
-    polar.relim()
-    polar.autoscale_view()
-    fig.canvas.draw()
+
 
 
     # ax1 = fig.add_subplot(221)
