@@ -7,7 +7,7 @@ import curses
 import torch
 import torch.nn as nn
 from torch.optim import Adam
-from torch.utils.data import DataLoader, ConcatDataset
+from torch.utils.data import DataLoader, ConcatDataset, WeightedRandomSampler
 import numpy as np
 import wandb
 import gym
@@ -16,7 +16,7 @@ import matplotlib.pyplot as plt
 
 from distributions import TanhTransformedGaussian, ScaledTanhTransformedGaussian
 from viz import Curses
-from wm2.data.datasets import Buffer, SARDataset, SARNextDataset
+from wm2.data.datasets import Buffer, SARDataset, SARNextDataset, SimpleRewardDataset
 from wm2.utils import Pbar
 from data.utils import pad_collate_2
 import wm2.utils
@@ -93,6 +93,22 @@ class LunarLanderConnector:
         mu = torch.zeros((2,))
         scale = torch.full((2,), 0.5)
         return ScaledTanhTransformedGaussian(mu, scale)
+
+    @staticmethod
+    def reward_mask_f(state, reward, action):
+        r = np.concatenate(reward)
+        less_than_0_3 = r <= 0.3
+        p = np.ones_like(r)
+        num_small_reward = r.shape[0] - less_than_0_3.sum()
+        if num_small_reward > 0:
+            p = p / num_small_reward
+            p = p * ~less_than_0_3
+        else:
+            p = p / r.shape[0]
+        i = np.random.choice(r.shape[0], less_than_0_3.sum(), p=p)
+        less_than_0_3[i] = True
+        return less_than_0_3[:, np.newaxis]
+
 
 
 def gather_experience(buff, episode, env, policy, eps=0.0, eps_policy=None, render=True):
@@ -224,6 +240,45 @@ class PendulumViz:
             self.fig.canvas.draw()
 
 
+class LunarLanderViz:
+    def __init__(self):
+        plt.ion()
+        self.fig = plt.figure(num=None, figsize=(16, 12), dpi=80, facecolor='w', edgecolor='k')
+
+        self.rew_hist = self.fig.add_subplot(211)
+        self.rew_hist.hist(np.zeros((1,)), label='reward')
+        self.rew_hist.relim()
+        self.rew_hist.autoscale_view()
+        self.rew_hist.legend()
+
+        self.prew_hist = self.fig.add_subplot(212)
+        self.prew_hist.hist(np.zeros((1,)), label='predicted reward')
+        self.prew_hist.relim()
+        self.prew_hist.autoscale_view()
+        self.rew_hist.legend()
+
+        self.fig.canvas.draw()
+
+    def plot_rewards_histogram(self, b, R):
+        with torch.no_grad():
+            r = np.concatenate([b.trajectories[t][i].reward for t, i in b.index])
+            s = np.stack([b.trajectories[t][i].state for t, i in b.index])
+
+            pr = R(torch.from_numpy(s).to(device=args.device)).cpu().squeeze().numpy()
+
+            self.rew_hist.clear()
+            self.rew_hist.hist(r, bins=100)
+            self.rew_hist.relim()
+            self.rew_hist.autoscale_view()
+
+            self.prew_hist.clear()
+            self.prew_hist.hist(pr, bins=100)
+            self.prew_hist.relim()
+            self.prew_hist.autoscale_view()
+
+            self.fig.canvas.draw()
+
+
 def main(args):
 
     # curses
@@ -235,6 +290,8 @@ def main(args):
     imagine_log_cooldown = wm2.utils.Cooldown(secs=30)
     transition_log_cooldown = wm2.utils.Cooldown(secs=30)
 
+    # viz
+    viz = LunarLanderViz()
 
     # environment
     # env = LinEnv()
@@ -282,6 +339,8 @@ def main(args):
 
     scr.clear()
 
+    viz.plot_rewards_histogram(train_buff, R)
+
     while not converged:
 
         for c in range(args.collect_interval):
@@ -323,27 +382,51 @@ def main(args):
                     scr.update_table(trajectories.action[10:20, 0, :].detach().cpu().numpy().T, h=16,
                                      title='action')
 
-            # Reward learning
-            # train, test = SARDataset(train_buff, mask_f=reward_mask_f), SARDataset(test_buff, mask_f=reward_mask_f)
-            train, test = SARDataset(train_buff), SARDataset(test_buff)
-            train = DataLoader(train, batch_size=args.batch_size, collate_fn=pad_collate_2, shuffle=True)
-            test = DataLoader(test, batch_size=args.batch_size, collate_fn=pad_collate_2, shuffle=True)
-            for trajectories in train:
+            train, test = SimpleRewardDataset(train_buff), SimpleRewardDataset(test_buff)
+            train_weights, test_weights = train.weights(), test.weights()
+            train_sampler = WeightedRandomSampler(train_weights, len(train_weights)//4)
+            test_sampler = WeightedRandomSampler(test_weights, len(test_weights)//4)
+            train = DataLoader(train, batch_size=args.batch_size, sampler=train_sampler)
+            test = DataLoader(test, batch_size=args.batch_size, sampler=test_sampler)
+
+            for state, reward in train:
                 R_optim.zero_grad()
-                predicted_reward = R(trajectories.state.to(args.device))
-                loss = (((trajectories.reward.to(args.device) - predicted_reward) * trajectories.pad.to(
-                    args.device)) ** 2).mean()
+                predicted_reward = R(state.to(args.device))
+                loss = ((reward.to(args.device) - predicted_reward) ** 2).mean()
                 loss.backward()
                 R_optim.step()
                 scr.update_slot('reward_train', f'Reward train loss {loss.item()}')
                 wandb.log({'reward_train': loss.item()})
 
-            for trajectories in test:
-                predicted_reward = R(trajectories.state.to(args.device))
-                loss = (((trajectories.reward.to(args.device) - predicted_reward) * trajectories.pad.to(
-                    args.device)) ** 2).mean()
+            for state, reward in test:
+                predicted_reward = R(state.to(args.device))
+                loss = ((reward.to(args.device) - predicted_reward) ** 2).mean()
                 scr.update_slot('reward_test', f'Reward test loss  {loss.item()}')
                 wandb.log({'reward_test': loss.item()})
+
+
+            # Reward learning
+            # train, test = SARDataset(train_buff, mask_f=env.connector.reward_mask_f), \
+            #               SARDataset(test_buff, mask_f=env.connector.reward_mask_f)
+            # #train, test = SARDataset(train_buff), SARDataset(test_buff)
+            # train = DataLoader(train, batch_size=args.batch_size, collate_fn=pad_collate_2, shuffle=True)
+            # test = DataLoader(test, batch_size=args.batch_size, collate_fn=pad_collate_2, shuffle=True)
+            # for trajectories in train:
+            #     mask, pad = trajectories.mask.to(args.device), trajectories.pad.to(args.device)
+            #     R_optim.zero_grad()
+            #     predicted_reward = R(trajectories.state.to(args.device))
+            #     loss = (((trajectories.reward.to(args.device) - predicted_reward) * mask * pad) ** 2).mean()
+            #     loss.backward()
+            #     R_optim.step()
+            #     scr.update_slot('reward_train', f'Reward train loss {loss.item()}')
+            #     wandb.log({'reward_train': loss.item()})
+            #
+            # for trajectories in test:
+            #     predicted_reward = R(trajectories.state.to(args.device))
+            #     mask, pad = trajectories.mask.to(args.device), trajectories.pad.to(args.device)
+            #     loss = (((trajectories.reward.to(args.device) - predicted_reward) * mask * pad) ** 2).mean()
+            #     scr.update_slot('reward_test', f'Reward test loss  {loss.item()}')
+            #     wandb.log({'reward_test': loss.item()})
 
             # Terminal state learning
             # train, test = SDDataset(train_buff), SDDataset(test_buff)
@@ -485,6 +568,8 @@ def main(args):
             for reward in recent_reward:
                 rr += f' {reward:.5f},'
             scr.update_slot('recent_rewards', 'Recent rewards: ' + rr)
+
+        viz.plot_rewards_histogram(train_buff, R)
 
         if random() < 1.1:
             test_buff, reward = gather_experience(test_buff, test_episode, env, policy,

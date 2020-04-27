@@ -169,6 +169,31 @@ class SARNextDataset(Dataset):
 #                 'next_state': np.stack(state[1:]),
 #                 'mask': self.mask_f(state[:-1], reward[:-1], action[:-1])}
 
+class SimpleRewardDataset(Dataset):
+    def __init__(self, buffer):
+        self.b = buffer
+
+    def __len__(self):
+        return sum([len(trajectory) for trajectory in self.b.trajectories])
+
+    def __getitem__(self, item):
+        step = self.b.get_step(item)
+        return step.state, step.reward
+
+    def weights(self):
+        """probabilites to rebalance for sparse rewards"""
+        w_rew = 1 / self.b.rewards_count * 0.5
+        w_no_rew = 1 / (len(self) - self.b.rewards_count) * 0.5
+
+        weights = []
+        for t in self.b.trajectories:
+            for step in t:
+                if step.has_reward:
+                    weights.append(w_rew)
+                else:
+                    weights.append(w_no_rew)
+        return weights
+
 
 class RewDataset:
     def __init__(self, buffer, prefix_len, prefix_mode='stack'):
