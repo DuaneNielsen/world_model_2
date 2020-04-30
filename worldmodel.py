@@ -338,6 +338,7 @@ def main(args):
     wandb.gym.monitor()
     imagine_log_cooldown = wm2.utils.Cooldown(secs=30)
     transition_log_cooldown = wm2.utils.Cooldown(secs=30)
+    render_cooldown = wm2.utils.Cooldown(secs=30)
 
     # viz
     viz = LunarLanderViz()
@@ -671,7 +672,7 @@ def main(args):
         for _ in range(1):
             train_buff, reward = gather_experience(train_buff, train_episode, env, policy,
                                                    eps=eps, eps_policy=env.connector.random_policy,
-                                                   render=False)
+                                                   render=render_cooldown())
             train_episode += 1
 
             wandb.log({'reward': reward})
@@ -687,7 +688,8 @@ def main(args):
 
         if random() < 0.1:
             test_buff, reward = gather_experience(test_buff, test_episode, env, policy,
-                                                  eps=eps, eps_policy=env.connector.random_policy)
+                                                  eps=eps, eps_policy=env.connector.random_policy,
+                                                  render=False)
             test_episode += 1
 
         # boost or decrease exploration if no reward
