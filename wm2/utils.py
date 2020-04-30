@@ -21,6 +21,40 @@ class TensorNamespace(SimpleNamespace):
         return self
 
 
+class SaveLoad:
+    def __init__(self, label, checkpoint_secs=300):
+        self.label = label
+        self.checkpoint_cooldown = Cooldown(checkpoint_secs)
+        self.items_processed = 0
+        self.best_loss = 0
+
+    def checkpoint(self, model, optimizer):
+        if self.checkpoint_cooldown:
+            save = {}
+            save['items_processed'] = self.items_processed
+            save['optimizer_state_dict'] = optimizer.state_dict()
+            save['model'] = model.state_dict()
+            torch.save(save, str(Path(wandb.run.dir) / Path(f'{self.label}_checkpoint.pt')))
+
+    def save_if_best(self, loss, model):
+        if loss.item() < self.best_loss:
+            save = {}
+            self.best_loss = loss.item()
+            save['loss'] = loss.item()
+            save['model'] = model.state_dict()
+            torch.save(save, str(Path(wandb.run.dir) / Path(f'{self.label}_best.pt')))
+
+    @staticmethod
+    def best(wandb_run_dir, label):
+        f = str(Path(wandb_run_dir) / Path(f'{label}_best.pt'))
+        return torch.load(f)
+
+    @staticmethod
+    def restore_checkpoint(label, wandb_run_dir):
+        f = str(Path(wandb_run_dir) / Path(f'{label}_checkpoint.pt'))
+        return torch.load(f)
+
+
 class Pbar:
     def __init__(self, items_to_process, train_len, batch_size, label, train_depth=None, checkpoint_secs=60):
         """

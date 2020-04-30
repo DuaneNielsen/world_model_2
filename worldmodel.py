@@ -8,9 +8,12 @@ import torch
 import torch.nn as nn
 from torch.optim import Adam
 from torch.utils.data import DataLoader, ConcatDataset, WeightedRandomSampler
+from torch.distributions import Normal, Categorical
+from torch.distributions.mixture_same_family import MixtureSameFamily
 import numpy as np
 import wandb
 import gym
+import gym.wrappers
 
 import matplotlib.pyplot as plt
 
@@ -110,7 +113,6 @@ class LunarLanderConnector:
         return less_than_0_3[:, np.newaxis]
 
 
-
 def gather_experience(buff, episode, env, policy, eps=0.0, eps_policy=None, render=True):
     with torch.no_grad():
         # gather new experience
@@ -121,7 +123,8 @@ def gather_experience(buff, episode, env, policy, eps=0.0, eps_policy=None, rend
         else:
             action = eps_policy(env.connector.policy_prepro(state).unsqueeze(0)).rsample()
         action = env.connector.action_prepro(action)
-        buff.append(episode, env.connector.buffer_prepro(state), action, env.connector.reward_prepro(reward), done, None)
+        buff.append(episode, env.connector.buffer_prepro(state), action, env.connector.reward_prepro(reward), done,
+                    None)
         episode_reward += reward
         if render:
             env.render()
@@ -133,7 +136,8 @@ def gather_experience(buff, episode, env, policy, eps=0.0, eps_policy=None, rend
             else:
                 action = eps_policy(env.connector.policy_prepro(state).unsqueeze(0)).rsample()
             action = env.connector.action_prepro(action)
-            buff.append(episode, env.connector.buffer_prepro(state), action, env.connector.reward_prepro(reward), done, None)
+            buff.append(episode, env.connector.buffer_prepro(state), action, env.connector.reward_prepro(reward), done,
+                        None)
             if render:
                 env.render()
     return buff, episode_reward
@@ -165,17 +169,60 @@ class MLP(nn.Module):
         return self.mlp(inp)
 
 
+class Mixture(nn.Module):
+    def __init__(self, state_dims, hidden_dims, n_gaussians=12, nonlin=None):
+        super().__init__()
+        self.hidden_net = MLP([state_dims, *hidden_dims], nonlin)
+        n_hidden = hidden_dims[-1]
+        self.z_pi = nn.Linear(n_hidden, n_gaussians)
+        self.z_mu = nn.Linear(n_hidden, n_gaussians)
+        self.z_sigma = nn.Linear(n_hidden, n_gaussians)
+
+    def forward(self, inp):
+        last_dim = len(inp.shape) - 1
+        hidden = torch.tanh(self.hidden_net(inp))
+        pi = torch.softmax(self.z_pi(hidden), dim=last_dim)
+        mu = self.z_mu(hidden)
+        sigma = torch.exp(self.z_sigma(hidden))
+        mix = Categorical(probs=pi)
+        comp = Normal(mu, sigma)
+        gmm = MixtureSameFamily(mix, comp)
+        return gmm
+
+
+class HandcraftedPrior(nn.Module):
+    def __init__(self, state_dims, hidden_dims, nonlin=None):
+        super().__init__()
+        self.crash_detector = MLP([state_dims, *hidden_dims, 1], nonlin=nonlin)
+        self.landing_detector = MLP([state_dims, *hidden_dims, 1], nonlin=nonlin)
+        self.frame_rewards = MLP([state_dims, *hidden_dims, 1], nonlin=nonlin)
+
+    def forward(self, state):
+        crashed = self.crash_detector(state)
+        landed = self.landing_detector(state)
+        frame_reward = nn.functional.tanh(self.frame_rewards(state))
+        return crashed * -1.0 + landed * 1.0 + (frame_reward / 2)
+
+        # mu =
+        # phi_one = torch.narrow(phi, last_dim, 0, 1)
+        # phi_two = torch.narrow(phi, last_dim, 1, 1)
+        # phi_three = torch.narrow(phi, last_dim, 2, 1)
+        # one = self.one(inp)
+        # two = self.two(inp)
+        # return phi_one * one + phi_two * -1.0 + phi_three * (two + 0.2)
+
+
 class Policy(nn.Module):
     def __init__(self, layers, min=-1.0, max=1.0):
         super().__init__()
         self.mu = MLP(layers)
-        #self.scale = nn.Linear(state_dims, 1, bias=False)
+        # self.scale = nn.Linear(state_dims, 1, bias=False)
         self.min = min
         self.max = max
 
     def forward(self, state):
         mu = self.mu(state)
-        #scale = torch.sigmoid(self.scale(state))
+        # scale = torch.sigmoid(self.scale(state))
         return ScaledTanhTransformedGaussian(mu, 0.2, min=self.min, max=self.max)
 
 
@@ -264,15 +311,18 @@ class LunarLanderViz:
             r = np.concatenate([b.trajectories[t][i].reward for t, i in b.index])
             s = np.stack([b.trajectories[t][i].state for t, i in b.index])
 
-            pr = R(torch.from_numpy(s).to(device=args.device)).cpu().squeeze().numpy()
+            pr = R(torch.from_numpy(s).to(device=args.device))
+            pr = pr.cpu().detach().numpy()
 
             self.rew_hist.clear()
             self.rew_hist.hist(r, bins=100)
+            self.rew_hist.set_yscale('log')
             self.rew_hist.relim()
             self.rew_hist.autoscale_view()
 
             self.prew_hist.clear()
             self.prew_hist.hist(pr, bins=100)
+            self.prew_hist.set_yscale('log')
             self.prew_hist.relim()
             self.prew_hist.autoscale_view()
 
@@ -280,7 +330,6 @@ class LunarLanderViz:
 
 
 def main(args):
-
     # curses
     scr = Curses()
 
@@ -297,6 +346,12 @@ def main(args):
     # env = LinEnv()
     # env = gym.make('Pendulum-v0')
     env = gym.make('LunarLanderContinuous-v2')
+
+    def normalize_reward(reward):
+        return reward / 100.0
+
+    env = gym.wrappers.TransformReward(env, normalize_reward)
+
     env.connector = LunarLanderConnector
 
     args.state_dims = env.observation_space.shape[0]
@@ -311,7 +366,8 @@ def main(args):
     eps = 0.05
 
     # policy model
-    policy = Policy(layers=[args.state_dims, *args.policy_hidden_dims, args.action_dims], min=args.action_min, max=args.action_max).to(args.device)
+    policy = Policy(layers=[args.state_dims, *args.policy_hidden_dims, args.action_dims], min=args.action_min,
+                    max=args.action_max).to(args.device)
     policy_optim = Adam(policy.parameters(), lr=args.lr)
 
     # value model
@@ -327,13 +383,21 @@ def main(args):
     T_optim = Adam(T.parameters(), lr=args.lr)
 
     # reward model
-    R = MLP([args.state_dims, *args.reward_hidden_dims, 1], nonlin=args.nonlin).to(args.device)
+    R = HandcraftedPrior(args.state_dims, args.reward_hidden_dims, nonlin=args.nonlin).to(args.device)
+    # R = Mixture(args.state_dims, args.reward_hidden_dims, nonlin=args.nonlin).to(args.device)
+    # R = MLP([args.state_dims, *args.reward_hidden_dims, 1], nonlin=args.nonlin).to(args.device)
     # R = nn.Linear(state_dims, 1)
     R_optim = Adam(R.parameters(), lr=args.lr)
 
     # terminal state model
     # D = nn.Linear(state_dims, 1).to(args.device)
     # D_optim = Adam(D.parameters(), lr=args.lr)
+
+    "save and restore helpers"
+    R_saver = wm2.utils.SaveLoad('reward')
+    policy_saver = wm2.utils.SaveLoad('policy')
+    value_saver = wm2.utils.SaveLoad('value')
+    T_saver = wm2.utils.SaveLoad('T')
 
     converged = False
 
@@ -365,6 +429,7 @@ def main(args):
                 T_optim.step()
                 scr.update_slot('transition_train', f'Transition training loss {loss.item()}')
                 wandb.log({'transition_train': loss.item()})
+                T_saver.checkpoint(T, T_optim)
 
             for trajectories in test:
                 input = torch.cat((trajectories.state, trajectories.action), dim=2).to(args.device)
@@ -374,6 +439,7 @@ def main(args):
                 loss = loss.mean()
                 scr.update_slot('transition_test', f'Transition test loss  {loss.item()}')
                 wandb.log({'transition_test': loss.item()})
+                T_saver.save_if_best(loss, T)
                 if transition_log_cooldown():
                     scr.update_table(trajectories.next_state[10:20, 0, :].detach().cpu().numpy().T, h=10,
                                      title='next_state')
@@ -383,27 +449,66 @@ def main(args):
                                      title='action')
 
             train, test = SimpleRewardDataset(train_buff), SimpleRewardDataset(test_buff)
-            train_weights, test_weights = train.weights(), test.weights()
-            train_sampler = WeightedRandomSampler(train_weights, len(train_weights)//4)
-            test_sampler = WeightedRandomSampler(test_weights, len(test_weights)//4)
-            train = DataLoader(train, batch_size=args.batch_size, sampler=train_sampler)
-            test = DataLoader(test, batch_size=args.batch_size, sampler=test_sampler)
+
+            def weights(b, log=False):
+                count = {'0.2': 0, '-1': 0, 'other': 0}
+                total = 0
+
+                for traj, t in b.index:
+                    step = b.trajectories[traj][t]
+                    total += 1
+                    if step.reward > 0.20:
+                        count['0.2'] += 1
+                    elif step.reward <= -1.0:
+                        count['-1'] += 1
+                    else:
+                        count['other'] += 1
+
+                probs = {}
+                for k, c in count.items():
+                    if log:
+                        scr.update_slot(f'{k}', f'{k} : {c}')
+                    probs[k] = 1 / (3 * (c + eps))
+
+                wghts = []
+
+                for traj, t in b.index:
+                    step = b.trajectories[traj][t]
+                    if step.reward > 0.20:
+                        wghts.append(probs['0.2'])
+                    elif step.reward <= -1.0:
+                        wghts.append(probs['-1'])
+                    else:
+                        wghts.append(probs['other'])
+
+                return wghts
+
+            train_weights, test_weights = weights(train_buff, log=True), weights(test_buff)
+            train_sampler = WeightedRandomSampler(train_weights, len(train_weights), replacement=True)
+            test_sampler = WeightedRandomSampler(test_weights, len(test_weights), replacement=True)
+            train = DataLoader(train, batch_size=256, sampler=train_sampler)
+            test = DataLoader(test, batch_size=256, sampler=test_sampler)
 
             for state, reward in train:
                 R_optim.zero_grad()
+                # dist = R(state.to(args.device))
+                # loss = - dist.log_prob(reward.to(args.device)).mean()
                 predicted_reward = R(state.to(args.device))
                 loss = ((reward.to(args.device) - predicted_reward) ** 2).mean()
                 loss.backward()
                 R_optim.step()
                 scr.update_slot('reward_train', f'Reward train loss {loss.item()}')
                 wandb.log({'reward_train': loss.item()})
+                R_saver.checkpoint(R, R_optim)
 
             for state, reward in test:
+                # dist = R(state.to(args.device))
+                # loss = - dist.log_prob(reward.to(args.device)).mean()
                 predicted_reward = R(state.to(args.device))
                 loss = ((reward.to(args.device) - predicted_reward) ** 2).mean()
                 scr.update_slot('reward_test', f'Reward test loss  {loss.item()}')
                 wandb.log({'reward_test': loss.item()})
-
+                R_saver.save_if_best(loss, R)
 
             # Reward learning
             # train, test = SARDataset(train_buff, mask_f=env.connector.reward_mask_f), \
@@ -456,7 +561,7 @@ def main(args):
             for trajectory in train:
                 imagine = [torch.cat((trajectory.state, trajectory.action), dim=2).to(args.device)]
                 reward = [R(trajectory.state.to(args.device))]
-                #done = [D(trajectory.state.to(args.device))]
+                # done = [D(trajectory.state.to(args.device))]
                 v = [value(trajectory.state.to(args.device))]
 
                 # imagine forward here
@@ -534,30 +639,39 @@ def main(args):
                 lam[0:-1] = lam[0:-1] * (1 - args.lam)
                 VL = (VNK * lam).sum(0)
 
+                "backprop loss"
                 policy_optim.zero_grad(), value_optim.zero_grad()
                 T_optim.zero_grad(), R_optim.zero_grad()  # , D_optim.zero_grad()
-                # policy_loss = - VR.mean()
                 policy_loss = -VL.mean()
                 policy_loss.backward()
                 policy_optim.step()
+
+                "housekeeping"
                 scr.update_slot('policy_loss', f'Policy loss  {policy_loss.item()}')
                 wandb.log({'policy_loss': policy_loss.item()})
+                policy_saver.checkpoint(policy, policy_optim)
+                policy_saver.save_if_best(policy_loss, policy)
 
-                # regress against tau ie: the initial estimated value...
+                " regress value against tau ie: the initial estimated value... "
                 policy_optim.zero_grad(), value_optim.zero_grad()
                 T_optim.zero_grad(), R_optim.zero_grad()  # , D_optim.zero_grad()
-
                 VN = VL.detach().reshape(L * N, -1)
                 values = value(trajectory.state.reshape(L * N, -1).to(args.device))
                 value_loss = ((VN - values) ** 2).mean() / 2
                 value_loss.backward()
                 value_optim.step()
+
+                "housekeeping"
                 scr.update_slot('value_loss', f'Value loss  {value_loss.item()}')
                 wandb.log({'value_loss': value_loss.item()})
+                value_saver.checkpoint(value, value_optim)
+                value_saver.save_if_best(value_loss, value)
 
-        for _ in range(3):
+        "run the policy on the environment and collect experience"
+        for _ in range(1):
             train_buff, reward = gather_experience(train_buff, train_episode, env, policy,
-                                                  eps=eps, eps_policy=env.connector.random_policy)
+                                                   eps=eps, eps_policy=env.connector.random_policy,
+                                                   render=False)
             train_episode += 1
 
             wandb.log({'reward': reward})
@@ -571,7 +685,7 @@ def main(args):
 
         viz.plot_rewards_histogram(train_buff, R)
 
-        if random() < 1.1:
+        if random() < 0.1:
             test_buff, reward = gather_experience(test_buff, test_episode, env, policy,
                                                   eps=eps, eps_policy=env.connector.random_policy)
             test_episode += 1
@@ -586,8 +700,8 @@ def main(args):
 
 
 if __name__ == '__main__':
-    args = {'seed_episodes': 40,
-            'collect_interval': 10,
+    args = {'seed_episodes': 5,
+            'collect_interval': 1,
             'batch_size': 8,
             'device': 'cuda:0',
             'horizon': 15,

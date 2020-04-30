@@ -241,7 +241,6 @@ class RewDataset:
                     weights.append(w_no_rew)
         return weights
 
-
 class RewardSubsequenceDataset:
     def __init__(self, buffer, prefix_len):
         """
