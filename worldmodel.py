@@ -397,9 +397,9 @@ def main(args):
     T_optim = Adam(T.parameters(), lr=args.lr)
 
     # reward model
-    R = HandcraftedPrior(args.state_dims, args.reward_hidden_dims, nonlin=args.nonlin).to(args.device)
+    # R = HandcraftedPrior(args.state_dims, args.reward_hidden_dims, nonlin=args.nonlin).to(args.device)
     # R = Mixture(args.state_dims, args.reward_hidden_dims, nonlin=args.nonlin).to(args.device)
-    # R = MLP([args.state_dims, *args.reward_hidden_dims, 1], nonlin=args.nonlin).to(args.device)
+    R = MLP([args.state_dims, *args.reward_hidden_dims, 1], nonlin=args.nonlin).to(args.device)
     # R = nn.Linear(state_dims, 1)
     R_optim = Adam(R.parameters(), lr=args.lr)
 
