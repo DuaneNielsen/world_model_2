@@ -11,6 +11,14 @@ from tqdm import tqdm
 
 from data.utils import SARI, one_hot
 
+class DummyBuffer:
+    def __init__(self):
+        pass
+
+    def append(self, traj_id, state, action, reward, done, info):
+        """subclass and override this method to get different buffer write behavior"""
+        pass
+
 
 class Buffer:
     def __init__(self):

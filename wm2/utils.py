@@ -26,7 +26,7 @@ class SaveLoad:
         self.label = label
         self.checkpoint_cooldown = Cooldown(checkpoint_secs)
         self.items_processed = 0
-        self.best_loss = 0
+        self.best_loss = None
 
     def checkpoint(self, model, optimizer):
         if self.checkpoint_cooldown:
@@ -36,12 +36,16 @@ class SaveLoad:
             save['model'] = model.state_dict()
             torch.save(save, str(Path(wandb.run.dir) / Path(f'{self.label}_checkpoint.pt')))
 
-    def save_if_best(self, loss, model):
-        if loss.item() < self.best_loss:
+    def save_if_best(self, loss, model, mode='lowest'):
+        loss = loss.item() if not type(float) else loss
+        if self.best_loss is None:
+            self.best_loss = loss
+        improved = loss < self.best_loss if mode == 'lowest' else loss > self.best_loss
+        if improved:
+            self.best_loss = loss
             save = {}
-            self.best_loss = loss.item()
-            save['loss'] = loss.item()
             save['model'] = model.state_dict()
+            save['loss'] = loss
             torch.save(save, str(Path(wandb.run.dir) / Path(f'{self.label}_best.pt')))
 
     @staticmethod
@@ -70,7 +74,7 @@ class Pbar:
         self.bar = tqdm(total=items_to_process)
         self.items_processed = 0
         self.label = label
-        depth = train_depth if train_depth is not None else min((train_len//batch_size) + 1, 10)
+        depth = train_depth if train_depth is not None else min((train_len // batch_size) + 1, 10)
         self.loss_move_ave = deque(maxlen=depth)
         self.test = []
         self.test_loss = 0.0
@@ -140,5 +144,3 @@ class Cooldown:
         if expired:
             self.last_cooldown = now
         return expired
-
-

@@ -3,6 +3,7 @@ from collections import deque
 from statistics import mean
 from random import random
 import curses
+import argparse
 
 import torch
 import torch.nn as nn
@@ -19,10 +20,11 @@ import matplotlib.pyplot as plt
 
 from distributions import TanhTransformedGaussian, ScaledTanhTransformedGaussian
 from viz import Curses
-from wm2.data.datasets import Buffer, SARDataset, SARNextDataset, SimpleRewardDataset
+from wm2.data.datasets import Buffer, SARDataset, SARNextDataset, SimpleRewardDataset, DummyBuffer
 from wm2.utils import Pbar
 from data.utils import pad_collate_2
 import wm2.utils
+from wm2.env.LunarLander import LunarLanderContinuous
 
 
 class LinEnv:
@@ -249,6 +251,15 @@ def reward_mask_f(state, reward, action):
     return nonzero[:, np.newaxis]
 
 
+def reward_diff(state):
+    shaping = - 1 * torch.sqrt(state[:, 0] * state[:, 0] + state[:, 1] * state[:, 1]) \
+              - 1 * torch.sqrt(state[:, 2] * state[:, 2] + state[:, 3] * state[:, 3]) \
+              - 1 * torch.abs(state[:, 4]) + 0.10 * state[:, 6] + 0.10 * state[7]
+
+    out_of_bounds = torch.abs(state[0]) > 1.0
+
+
+
 class PendulumViz:
     def __init__(self):
         # visualization
@@ -346,7 +357,9 @@ def main(args):
     # environment
     # env = LinEnv()
     # env = gym.make('Pendulum-v0')
-    env = gym.make('LunarLanderContinuous-v2')
+    # env = gym.make('LunarLanderContinuous-v2')
+    env = LunarLanderContinuous()
+    env = gym.wrappers.TimeLimit(env, max_episode_steps=1000)
 
     def normalize_reward(reward):
         return reward / 100.0
@@ -651,7 +664,6 @@ def main(args):
                 scr.update_slot('policy_loss', f'Policy loss  {policy_loss.item()}')
                 wandb.log({'policy_loss': policy_loss.item()})
                 policy_saver.checkpoint(policy, policy_optim)
-                policy_saver.save_if_best(policy_loss, policy)
 
                 " regress value against tau ie: the initial estimated value... "
                 policy_optim.zero_grad(), value_optim.zero_grad()
@@ -675,6 +687,7 @@ def main(args):
                                                    render=render_cooldown())
             train_episode += 1
 
+            policy_saver.save_if_best(reward, policy, mode='highest')
             wandb.log({'reward': reward})
 
             recent_reward.append(reward)
@@ -701,11 +714,45 @@ def main(args):
         converged = False
 
 
+def demo():
+    # env = gym.make('LunarLanderContinuous-v2')
+    env = LunarLanderContinuous()
+    env = gym.wrappers.TimeLimit(env, max_episode_steps=1000)
+
+    def normalize_reward(reward):
+        return reward / 100.0
+
+    env = gym.wrappers.TransformReward(env, normalize_reward)
+
+    env.connector = LunarLanderConnector
+
+    args.state_dims = env.observation_space.shape[0]
+    args.action_dims = env.action_space.shape[0]
+    args.action_min = -1.0
+    args.action_max = 1.0
+
+    dummy_buffer = DummyBuffer()
+
+    # policy model
+    policy = Policy(layers=[args.state_dims, *args.policy_hidden_dims, args.action_dims], min=args.action_min,
+                    max=args.action_max).to(args.device)
+    wandb_run_dir = 'wandb/run-20200501_043058-nzxvviue'
+
+    while True:
+        load_dict = wm2.utils.SaveLoad.best(wandb_run_dir, 'policy')
+        loss = load_dict['loss']
+        policy.load_state_dict(load_dict['model'])
+        print(f'best_loss {loss}')
+        train_buff, reward = gather_experience(dummy_buffer, 0, env, policy,
+                                               eps=0.0, eps_policy=env.connector.random_policy,
+                                               render=True)
+
+
 if __name__ == '__main__':
     args = {'seed_episodes': 5,
             'collect_interval': 1,
             'batch_size': 8,
-            'device': 'cuda:0',
+            'device': 'cuda:1',
             'horizon': 15,
             'discount': 0.99,
             'lam': 0.95,
@@ -715,10 +762,20 @@ if __name__ == '__main__':
             'reward_hidden_dims': [300, 300],
             'nonlin': 'nn.ELU',
             'transition_layers': 2,
-            'transition_hidden_dim': 32
+            'transition_hidden_dim': 32,
+            'env': 'LunarLanderContinuous-v2',
+            'demo': False
             }
 
-    wandb.init(config=args)
-    args = SimpleNamespace(**args)
+    parser = argparse.ArgumentParser()
+    for argument, value in args.items():
+        parser.add_argument('--' + argument, type=type(value), required=False, default=value)
+    args = parser.parse_args()
 
-    curses.wrapper(main(args))
+    # args = SimpleNamespace(**args)
+
+    if not args.demo:
+        wandb.init(config=args)
+        curses.wrapper(main(args))
+    else:
+        demo()
