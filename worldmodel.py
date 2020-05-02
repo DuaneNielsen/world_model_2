@@ -24,7 +24,7 @@ from wm2.data.datasets import Buffer, SARDataset, SARNextSubSequenceDataset, Sim
 from wm2.utils import Pbar
 from data.utils import pad_collate_2
 import wm2.utils
-from wm2.env.LunarLander_v3 import LunarLanderContinuous, LunarLanderConnector
+from wm2.env.LunarLander_v3 import LunarLanderConnector
 
 
 class MLP(nn.Module):
@@ -131,13 +131,17 @@ class LunarLanderViz:
         plt.ion()
         self.fig = plt.figure(num=None, figsize=(16, 12), dpi=80, facecolor='w', edgecolor='k')
 
-        self.rew_hist = self.fig.add_subplot(211)
+        self.rew_live = self.fig.add_subplot(221)
+        self.rew_live_length = 1000
+        self.rewards = deque(maxlen=self.rew_live_length)
+
+        self.rew_hist = self.fig.add_subplot(222)
         self.rew_hist.hist(np.zeros((1,)), label='reward')
         self.rew_hist.relim()
         self.rew_hist.autoscale_view()
         self.rew_hist.legend()
 
-        self.prew_hist = self.fig.add_subplot(212)
+        self.prew_hist = self.fig.add_subplot(224)
         self.prew_hist.hist(np.zeros((1,)), label='predicted reward')
         self.prew_hist.relim()
         self.prew_hist.autoscale_view()
@@ -166,6 +170,15 @@ class LunarLanderViz:
             self.prew_hist.autoscale_view()
 
             self.fig.canvas.draw()
+
+    def update_rewards(self, reward):
+        self.rewards.append(reward)
+        y = np.array(self.rewards)
+        self.rew_live.clear()
+        self.rew_live.plot(y)
+        self.rew_live.relim()
+        self.rew_live.autoscale_view()
+        self.fig.canvas.draw()
 
 
 def gather_experience(buff, episode, env, policy, eps=0.0, eps_policy=None, render=True, seed=None):
@@ -197,7 +210,11 @@ def gather_experience(buff, episode, env, policy, eps=0.0, eps_policy=None, rend
             else:
                 action = eps_policy(env.connector.policy_prepro(state, args.device).unsqueeze(0)).rsample()
             action = env.connector.action_prepro(action)
-            buff.append(episode, env.connector.buffer_prepro(state), action, env.connector.reward_prepro(reward), done,
+            buff.append(episode,
+                        env.connector.buffer_prepro(state),
+                        action,
+                        env.connector.reward_prepro(reward),
+                        done,
                         None)
             if render:
                 env.render()
@@ -226,11 +243,7 @@ def main(args):
     viz = LunarLanderViz()
 
     # environment
-    # env = LinEnv()
-    # env = gym.make('Pendulum-v0')
-    # env = gym.make('LunarLanderContinuous-v2')
-    env = LunarLanderContinuous()
-    env = gym.wrappers.TimeLimit(env, max_episode_steps=1000)
+    env = gym.make(args.env)
 
     def normalize_reward(reward):
         return reward / 100.0
@@ -285,9 +298,7 @@ def main(args):
     T_saver = wm2.utils.SaveLoad('T')
 
     converged = False
-
     scr.clear()
-
     viz.plot_rewards_histogram(train_buff, R)
 
     while not converged:
@@ -562,6 +573,7 @@ def main(args):
                                                    render=render_cooldown())
             wandb.log({'reward': reward})
             sampled_rewards.append(reward)
+            viz.update_rewards(reward)
             train_episode += 1
 
             recent_reward.append(reward)
@@ -611,9 +623,7 @@ def demo(args):
     # policy model
     policy = Policy(layers=[args.state_dims, *args.policy_hidden_dims, args.action_dims], min=args.action_min,
                     max=args.action_max).to(args.device)
-    #wandb_run_dir = 'wandb/run-20200501_043058-nzxvviue'
-    #wandb_run_dir = 'wandb/dryrun-20200501_182442-d3ydj1o6'
-    #wandb_run_dir = 'wandb/run-20200501_185014-axr8ge2o'
+
     wandb_run_dir = args.demo
 
     while True:
@@ -642,12 +652,16 @@ if __name__ == '__main__':
             'transition_layers': 2,
             'transition_hidden_dim': 64,
             'env': 'LunarLanderContinuous-v3',
-            'demo': 'off'
+            'demo': 'off',
+            'seed': None
             }
 
     parser = argparse.ArgumentParser()
     for argument, value in args.items():
-        parser.add_argument('--' + argument, type=type(value), required=False, default=value)
+        if argument == 'seed':
+            parser.add_argument('--' + argument, type=int, required=False, default=None)
+        else:
+            parser.add_argument('--' + argument, type=type(value), required=False, default=value)
     args = parser.parse_args()
 
     # args = SimpleNamespace(**args)
