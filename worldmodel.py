@@ -590,9 +590,8 @@ def main(args):
         converged = False
 
 
-def demo():
-    # env = gym.make('LunarLanderContinuous-v2')
-    env = LunarLanderContinuous()
+def demo(args):
+    env = gym.make(args.env)
     env = gym.wrappers.TimeLimit(env, max_episode_steps=1000)
 
     def normalize_reward(reward):
@@ -612,10 +611,10 @@ def demo():
     # policy model
     policy = Policy(layers=[args.state_dims, *args.policy_hidden_dims, args.action_dims], min=args.action_min,
                     max=args.action_max).to(args.device)
-    wandb_run_dir = 'wandb/run-20200501_043058-nzxvviue'
-    wandb_run_dir = 'wandb/dryrun-20200501_182442-d3ydj1o6'
-    wandb_run_dir = 'wandb/run-20200501_185014-axr8ge2o'
-    wandb_run_dir = 'wandb/run-20200502_000440-4xfi0puo'
+    #wandb_run_dir = 'wandb/run-20200501_043058-nzxvviue'
+    #wandb_run_dir = 'wandb/dryrun-20200501_182442-d3ydj1o6'
+    #wandb_run_dir = 'wandb/run-20200501_185014-axr8ge2o'
+    wandb_run_dir = args.demo
 
     while True:
         load_dict = wm2.utils.SaveLoad.best(wandb_run_dir, 'policy')
@@ -642,8 +641,8 @@ if __name__ == '__main__':
             'nonlin': 'nn.ELU',
             'transition_layers': 2,
             'transition_hidden_dim': 64,
-            'env': 'LunarLanderContinuous-v2',
-            'demo': False
+            'env': 'LunarLanderContinuous-v3',
+            'demo': 'off'
             }
 
     parser = argparse.ArgumentParser()
@@ -653,8 +652,8 @@ if __name__ == '__main__':
 
     # args = SimpleNamespace(**args)
 
-    if not args.demo:
+    if args.demo == 'off':
         wandb.init(config=args)
         curses.wrapper(main(args))
     else:
-        demo()
+        demo(args)
