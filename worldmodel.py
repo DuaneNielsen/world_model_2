@@ -188,23 +188,9 @@ def gather_experience(buff, episode, env, policy, eps=0.0, eps_policy=None, rend
         if seed is not None:
             env.seed(seed)
         state, reward, done = env.reset(), 0.0, False
-        if random() >= eps:
-            action = policy(env.connector.policy_prepro(state, args.device).unsqueeze(0)).rsample()
-        else:
-            action = eps_policy(env.connector.policy_prepro(state, args.device).unsqueeze(0)).rsample()
-        action = env.connector.action_prepro(action)
-        buff.append(episode,
-                    env.connector.buffer_prepro(state),
-                    action,
-                    env.connector.reward_prepro(reward),
-                    done,
-                    None)
         episode_reward += reward
-        if render:
-            env.render()
-        while not done:
-            state, reward, done, info = env.step(action)
-            episode_reward += reward
+
+        def get_action(state, reward, done):
             if random() >= eps:
                 action = policy(env.connector.policy_prepro(state, args.device).unsqueeze(0)).rsample()
             else:
@@ -218,6 +204,14 @@ def gather_experience(buff, episode, env, policy, eps=0.0, eps_policy=None, rend
                         None)
             if render:
                 env.render()
+            return action
+
+        action = get_action(state, reward, done)
+
+        while not done:
+            state, reward, done, info = env.step(action)
+            episode_reward += reward
+            action = get_action(state, reward, done)
     return buff, episode_reward
 
 
