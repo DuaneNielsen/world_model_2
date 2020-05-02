@@ -151,6 +151,42 @@ class SARNextDataset(Dataset):
                 'mask': self.mask_f(state[:-1], reward[:-1], action[:-1])}
 
 
+class SARNextSubSequenceDataset(Dataset):
+    def __init__(self, buffer, mask_f=None):
+        super().__init__()
+        self.b = buffer
+        self.mask_f = mask_f if mask_f is not None else mask_all
+        self.length = 15
+        self.index = self.b.subsequence_index(self.length)
+
+    def __len__(self):
+        return len(self.index)
+
+    def __getitem__(self, item):
+        traj, step = self.index[item]
+        state, reward, action, mask = [], [], [], []
+        for i in range(step, step + self.length):
+            step = self.b.trajectories[traj][i]
+            state += [step.state]
+            reward += [step.reward]
+            if isinstance(step.action, int):
+                action += [one_hot(step.action, self.b.action_max)]
+            else:
+                action += [step.action]
+
+        #astack = np.stack(action[:-1])
+        # print(f'SARNEXTDATASET {astack.max()}, {astack.min()}')
+        # if astack.max() > 2.0 or astack.min() < -2.0:
+        #     print(astack.max(), astack.min())
+
+
+
+        return {'state': np.stack(state[:-1]),
+                'action': np.stack(action[:-1]),
+                'reward': np.stack(reward[:-1]),
+                'next_state': np.stack(state[1:]),
+                'mask': self.mask_f(state[:-1], reward[:-1], action[:-1])}
+
 # class SARNextDataset(Dataset):
 #     def __init__(self, buffer, mask_f=None):
 #         super().__init__()

@@ -1,4 +1,3 @@
-from types import SimpleNamespace
 from collections import deque
 from statistics import mean
 from random import random
@@ -11,6 +10,7 @@ from torch.optim import Adam
 from torch.utils.data import DataLoader, ConcatDataset, WeightedRandomSampler
 from torch.distributions import Normal, Categorical
 from torch.distributions.mixture_same_family import MixtureSameFamily
+from torch.nn.utils import clip_grad_norm_
 import numpy as np
 import wandb
 import gym
@@ -18,138 +18,13 @@ import gym.wrappers
 
 import matplotlib.pyplot as plt
 
-from distributions import TanhTransformedGaussian, ScaledTanhTransformedGaussian
+from distributions import ScaledTanhTransformedGaussian
 from viz import Curses
-from wm2.data.datasets import Buffer, SARDataset, SARNextDataset, SimpleRewardDataset, DummyBuffer
+from wm2.data.datasets import Buffer, SARDataset, SARNextSubSequenceDataset, SimpleRewardDataset, DummyBuffer
 from wm2.utils import Pbar
 from data.utils import pad_collate_2
 import wm2.utils
-from wm2.env.LunarLander import LunarLanderContinuous
-
-
-class LinEnv:
-    def __init__(self):
-        self.pos = np.array([0.0], dtype=np.float32)
-        self.step_count = 0
-
-    def reset(self):
-        self.pos = np.array([0.0], dtype=np.float32)
-        self.step_count = 0
-        return self.pos.copy()
-
-    def step(self, action):
-        self.step_count += 1
-        self.pos += action
-        pos = self.pos.copy()
-
-        if pos >= 2.0:
-            return pos, 1.0, True
-        elif self.step_count > 10:
-            return pos, 0.0, True
-        elif pos <= -2.0:
-            return pos, -1.0, True
-        else:
-            return pos, 0.0, False
-
-
-class PendulumConnector:
-
-    @staticmethod
-    def policy_prepro(state):
-        return torch.tensor(state).float().to(args.device)
-
-    @staticmethod
-    def buffer_prepro(state):
-        return state.astype(np.float32)
-
-    @staticmethod
-    def random_policy(state):
-        return TanhTransformedGaussian(0.0, 0.5)
-
-    @staticmethod
-    def reward_prepro(reward):
-        return np.array([reward], dtype=np.float32)
-
-    @staticmethod
-    def action_prepro(action):
-        return np.array([action.item()], dtype=np.float32)
-
-
-class LunarLanderConnector:
-
-    @staticmethod
-    def policy_prepro(state):
-        return torch.tensor(state).float().to(args.device)
-
-    @staticmethod
-    def buffer_prepro(state):
-        return state.astype(np.float32)
-
-    @staticmethod
-    def reward_prepro(reward):
-        return np.array([reward], dtype=np.float32)
-
-    @staticmethod
-    def action_prepro(action):
-        return action.detach().cpu().squeeze().numpy().astype(np.float32)
-
-    @staticmethod
-    def random_policy(state):
-        mu = torch.zeros((2,))
-        scale = torch.full((2,), 0.5)
-        return ScaledTanhTransformedGaussian(mu, scale)
-
-    @staticmethod
-    def reward_mask_f(state, reward, action):
-        r = np.concatenate(reward)
-        less_than_0_3 = r <= 0.3
-        p = np.ones_like(r)
-        num_small_reward = r.shape[0] - less_than_0_3.sum()
-        if num_small_reward > 0:
-            p = p / num_small_reward
-            p = p * ~less_than_0_3
-        else:
-            p = p / r.shape[0]
-        i = np.random.choice(r.shape[0], less_than_0_3.sum(), p=p)
-        less_than_0_3[i] = True
-        return less_than_0_3[:, np.newaxis]
-
-
-def gather_experience(buff, episode, env, policy, eps=0.0, eps_policy=None, render=True):
-    with torch.no_grad():
-        # gather new experience
-        episode_reward = 0.0
-        state, reward, done = env.reset(), 0.0, False
-        if random() >= eps:
-            action = policy(env.connector.policy_prepro(state).unsqueeze(0)).rsample()
-        else:
-            action = eps_policy(env.connector.policy_prepro(state).unsqueeze(0)).rsample()
-        action = env.connector.action_prepro(action)
-        buff.append(episode, env.connector.buffer_prepro(state), action, env.connector.reward_prepro(reward), done,
-                    None)
-        episode_reward += reward
-        if render:
-            env.render()
-        while not done:
-            state, reward, done, info = env.step(action)
-            episode_reward += reward
-            if random() >= eps:
-                action = policy(env.connector.policy_prepro(state).unsqueeze(0)).rsample()
-            else:
-                action = eps_policy(env.connector.policy_prepro(state).unsqueeze(0)).rsample()
-            action = env.connector.action_prepro(action)
-            buff.append(episode, env.connector.buffer_prepro(state), action, env.connector.reward_prepro(reward), done,
-                        None)
-            if render:
-                env.render()
-    return buff, episode_reward
-
-
-def gather_seed_episodes(env, seed_episodes):
-    buff = Buffer()
-    for episode in range(seed_episodes):
-        gather_experience(buff, episode, env, env.connector.random_policy, render=False)
-    return buff
+from wm2.env.LunarLander_v3 import LunarLanderContinuous, LunarLanderConnector
 
 
 class MLP(nn.Module):
@@ -251,53 +126,6 @@ def reward_mask_f(state, reward, action):
     return nonzero[:, np.newaxis]
 
 
-def reward_diff(state):
-    shaping = - 1 * torch.sqrt(state[:, 0] * state[:, 0] + state[:, 1] * state[:, 1]) \
-              - 1 * torch.sqrt(state[:, 2] * state[:, 2] + state[:, 3] * state[:, 3]) \
-              - 1 * torch.abs(state[:, 4]) + 0.10 * state[:, 6] + 0.10 * state[7]
-
-    out_of_bounds = torch.abs(state[0]) > 1.0
-
-
-
-class PendulumViz:
-    def __init__(self):
-        # visualization
-        plt.ion()
-        self.fig = plt.figure(num=None, figsize=(16, 12), dpi=80, facecolor='w', edgecolor='k')
-        self.polar = self.fig.add_subplot(111, projection='polar')
-        self.theta = np.arange(0, np.pi * 2, 0.01, dtype=np.float32)[:, np.newaxis]
-        self.speeds = np.linspace(-8.0, 8.0, 7, dtype=np.float32)
-        self.speedlines = []
-        for speed in self.speeds:
-            self.speedlines += self.polar.plot(self.theta, np.ones_like(self.theta), label=f'{speed.item()}')
-        self.polar.grid(True)
-        self.polar.legend()
-        self.polar.set_theta_zero_location("N")
-        self.polar.relim()
-        self.polar.autoscale_view()
-        self.fig.canvas.draw()
-
-        # self.polar.set_rmax(2)
-        # self.polar.set_rticks([0.5, 1, 1.5, 2])  # Less radial ticks
-        # self.polar.set_rlabel_position(-22.5)  # Move radial labels away from plotted line
-
-    def plot_value(self, value):
-        with torch.no_grad():
-            for i, speed in enumerate(self.speeds):
-                theta = np.arange(0, np.pi * 2, 0.01, dtype=np.float32)[:, np.newaxis]
-                x, y, thetadot = np.cos(theta), np.sin(theta), np.ones_like(theta) * speed
-                plot_states = np.concatenate((x, y, thetadot), axis=1)
-                plot_states = torch.from_numpy(plot_states).to(args.device)
-                plot_v = value(plot_states)
-                plot_v = plot_v.detach().cpu().numpy()
-                self.speedlines[i].set_data(theta, plot_v)
-
-            self.polar.relim()
-            self.polar.autoscale_view()
-            self.fig.canvas.draw()
-
-
 class LunarLanderViz:
     def __init__(self):
         plt.ion()
@@ -338,6 +166,49 @@ class LunarLanderViz:
             self.prew_hist.autoscale_view()
 
             self.fig.canvas.draw()
+
+
+def gather_experience(buff, episode, env, policy, eps=0.0, eps_policy=None, render=True, seed=None):
+    with torch.no_grad():
+        # gather new experience
+        episode_reward = 0.0
+        if seed is not None:
+            env.seed(seed)
+        state, reward, done = env.reset(), 0.0, False
+        if random() >= eps:
+            action = policy(env.connector.policy_prepro(state, args.device).unsqueeze(0)).rsample()
+        else:
+            action = eps_policy(env.connector.policy_prepro(state, args.device).unsqueeze(0)).rsample()
+        action = env.connector.action_prepro(action)
+        buff.append(episode,
+                    env.connector.buffer_prepro(state),
+                    action,
+                    env.connector.reward_prepro(reward),
+                    done,
+                    None)
+        episode_reward += reward
+        if render:
+            env.render()
+        while not done:
+            state, reward, done, info = env.step(action)
+            episode_reward += reward
+            if random() >= eps:
+                action = policy(env.connector.policy_prepro(state, args.device).unsqueeze(0)).rsample()
+            else:
+                action = eps_policy(env.connector.policy_prepro(state, args.device).unsqueeze(0)).rsample()
+            action = env.connector.action_prepro(action)
+            buff.append(episode, env.connector.buffer_prepro(state), action, env.connector.reward_prepro(reward), done,
+                        None)
+            if render:
+                env.render()
+    return buff, episode_reward
+
+
+def gather_seed_episodes(env, seed_episodes):
+    buff = Buffer()
+    for episode in range(seed_episodes):
+        gather_experience(buff, episode, env, env.connector.random_policy, render=False)
+    return buff
 
 
 def main(args):
@@ -427,7 +298,7 @@ def main(args):
             scr.update_slot('wandb', f'{wandb.run.name} {wandb.run.project} {wandb.run.id}')
 
             # Dynamics learning
-            train, test = SARNextDataset(train_buff, mask_f=None), SARNextDataset(test_buff, mask_f=None)
+            train, test = SARNextSubSequenceDataset(train_buff, mask_f=None), SARNextSubSequenceDataset(test_buff, mask_f=None)
             train = DataLoader(train, batch_size=args.batch_size, collate_fn=pad_collate_2, shuffle=True)
             test = DataLoader(test, batch_size=args.batch_size, collate_fn=pad_collate_2, shuffle=True)
 
@@ -440,6 +311,7 @@ def main(args):
                     args.device)
                 loss = loss.mean()
                 loss.backward()
+                clip_grad_norm_(parameters=T.parameters(), max_norm=100.0)
                 T_optim.step()
                 scr.update_slot('transition_train', f'Transition training loss {loss.item()}')
                 wandb.log({'transition_train': loss.item()})
@@ -658,6 +530,7 @@ def main(args):
                 T_optim.zero_grad(), R_optim.zero_grad()  # , D_optim.zero_grad()
                 policy_loss = -VL.mean()
                 policy_loss.backward()
+                clip_grad_norm_(parameters=policy.parameters(), max_norm=100.0)
                 policy_optim.step()
 
                 "housekeeping"
@@ -672,6 +545,7 @@ def main(args):
                 values = value(trajectory.state.reshape(L * N, -1).to(args.device))
                 value_loss = ((VN - values) ** 2).mean() / 2
                 value_loss.backward()
+                clip_grad_norm_(parameters=value.parameters(), max_norm=100.0)
                 value_optim.step()
 
                 "housekeeping"
@@ -681,14 +555,14 @@ def main(args):
                 value_saver.save_if_best(value_loss, value)
 
         "run the policy on the environment and collect experience"
-        for _ in range(1):
+        sampled_rewards = []
+        for _ in range(10):
             train_buff, reward = gather_experience(train_buff, train_episode, env, policy,
                                                    eps=eps, eps_policy=env.connector.random_policy,
                                                    render=render_cooldown())
-            train_episode += 1
-
-            policy_saver.save_if_best(reward, policy, mode='highest')
             wandb.log({'reward': reward})
+            sampled_rewards.append(reward)
+            train_episode += 1
 
             recent_reward.append(reward)
             scr.update_slot('eps', f'EPS: {eps}')
@@ -697,9 +571,11 @@ def main(args):
                 rr += f' {reward:.5f},'
             scr.update_slot('recent_rewards', 'Recent rewards: ' + rr)
 
+        policy_saver.save_if_best(mean(sampled_rewards), policy, mode='highest')
+
         viz.plot_rewards_histogram(train_buff, R)
 
-        if random() < 0.1:
+        if random() < 1.0:
             test_buff, reward = gather_experience(test_buff, test_episode, env, policy,
                                                   eps=eps, eps_policy=env.connector.random_policy,
                                                   render=False)
@@ -737,6 +613,9 @@ def demo():
     policy = Policy(layers=[args.state_dims, *args.policy_hidden_dims, args.action_dims], min=args.action_min,
                     max=args.action_max).to(args.device)
     wandb_run_dir = 'wandb/run-20200501_043058-nzxvviue'
+    wandb_run_dir = 'wandb/dryrun-20200501_182442-d3ydj1o6'
+    wandb_run_dir = 'wandb/run-20200501_185014-axr8ge2o'
+    wandb_run_dir = 'wandb/run-20200502_000440-4xfi0puo'
 
     while True:
         load_dict = wm2.utils.SaveLoad.best(wandb_run_dir, 'policy')
@@ -762,7 +641,7 @@ if __name__ == '__main__':
             'reward_hidden_dims': [300, 300],
             'nonlin': 'nn.ELU',
             'transition_layers': 2,
-            'transition_hidden_dim': 32,
+            'transition_hidden_dim': 64,
             'env': 'LunarLanderContinuous-v2',
             'demo': False
             }
