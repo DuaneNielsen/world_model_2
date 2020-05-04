@@ -11,6 +11,7 @@ from tqdm import tqdm
 
 from data.utils import SARI, one_hot
 
+
 class DummyBuffer:
     def __init__(self):
         pass
@@ -84,6 +85,31 @@ class Buffer:
     def __len__(self):
         return len(self.trajectories)
 
+
+class SubsetSequenceBuffer:
+    def __init__(self, b, num_trajectories, length):
+        rnd = np.random.RandomState()
+        self.trajectories = []
+        for i in rnd.choice(len(b), num_trajectories):
+            trajectory = b.trajectories[i]
+            available = len(trajectory) - length + 1
+            if available < 1:
+                continue
+            else:
+                start = rnd.randint(0, available)
+                self.trajectories.append(b.trajectories[i][start:start+length])
+
+        self.index = []
+        for i, t in enumerate(self.trajectories):
+            for s in range(len(t)):
+                self.index.append((i, s))
+
+    def get_step(self, item):
+        traj_id, step_id = self.index[item]
+        return self.trajectories[traj_id][step_id]
+
+    def __len__(self):
+        return len(self.index)
 
 def mask_all(state, reward, action):
     return np.ones((len(state), 1), dtype=bool)
@@ -213,6 +239,7 @@ class SARNextSubSequenceDataset(Dataset):
 #                 'next_state': np.stack(state[1:]),
 #                 'mask': self.mask_f(state[:-1], reward[:-1], action[:-1])}
 
+
 class SimpleRewardDataset(Dataset):
     def __init__(self, buffer):
         self.b = buffer
@@ -284,6 +311,7 @@ class RewDataset:
                 else:
                     weights.append(w_no_rew)
         return weights
+
 
 class RewardSubsequenceDataset:
     def __init__(self, buffer, prefix_len):

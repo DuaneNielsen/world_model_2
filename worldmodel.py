@@ -3,6 +3,8 @@ from statistics import mean
 from random import random
 import curses
 import argparse
+from random import sample
+import time
 
 import torch
 import torch.nn as nn
@@ -15,16 +17,19 @@ import numpy as np
 import wandb
 import gym
 import gym.wrappers
+import pybulletgym
 
 import matplotlib.pyplot as plt
 
 from distributions import ScaledTanhTransformedGaussian
 from viz import Curses
-from wm2.data.datasets import Buffer, SARDataset, SARNextSubSequenceDataset, SimpleRewardDataset, DummyBuffer
+from wm2.data.datasets import Buffer, SARDataset, SARNextDataset, SimpleRewardDataset, DummyBuffer, \
+    SubsetSequenceBuffer
 from wm2.utils import Pbar
 from data.utils import pad_collate_2
 import wm2.utils
 from wm2.env.LunarLander_v3 import LunarLanderConnector
+from wm2.env.pybullet import PyBulletConnector
 
 
 class MLP(nn.Module):
@@ -36,9 +41,11 @@ class MLP(nn.Module):
         nonlin = nn.ELU if nonlin is None else eval(nonlin)
         for hidden in layers[1:-1]:
             net += [nn.Linear(in_dims, hidden)]
+            net += [nn.Dropout(0.5)]
             net += [nonlin()]
             in_dims = hidden
         net += [nn.Linear(in_dims, layers[-1], bias=False)]
+        net += [nn.Dropout(0.2)]
 
         self.mlp = nn.Sequential(*net)
 
@@ -67,47 +74,43 @@ class Mixture(nn.Module):
         return gmm
 
 
-class HandcraftedPrior(nn.Module):
-    def __init__(self, state_dims, hidden_dims, nonlin=None):
-        super().__init__()
-        self.crash_detector = MLP([state_dims, *hidden_dims, 1], nonlin=nonlin)
-        self.landing_detector = MLP([state_dims, *hidden_dims, 1], nonlin=nonlin)
-        self.frame_rewards = MLP([state_dims, *hidden_dims, 1], nonlin=nonlin)
-
-    def forward(self, state):
-        crashed = self.crash_detector(state)
-        landed = self.landing_detector(state)
-        frame_reward = nn.functional.tanh(self.frame_rewards(state))
-        return crashed * -1.0 + landed * 1.0 + (frame_reward / 2)
-
-        # mu =
-        # phi_one = torch.narrow(phi, last_dim, 0, 1)
-        # phi_two = torch.narrow(phi, last_dim, 1, 1)
-        # phi_three = torch.narrow(phi, last_dim, 2, 1)
-        # one = self.one(inp)
-        # two = self.two(inp)
-        # return phi_one * one + phi_two * -1.0 + phi_three * (two + 0.2)
-
-
 class Policy(nn.Module):
     def __init__(self, layers, min=-1.0, max=1.0):
         super().__init__()
         self.mu = MLP(layers)
-        # self.scale = nn.Linear(state_dims, 1, bias=False)
+        self.scale = nn.Linear(layers[0], 1, bias=False)
         self.min = min
         self.max = max
 
     def forward(self, state):
         mu = self.mu(state)
-        # scale = torch.sigmoid(self.scale(state))
-        return ScaledTanhTransformedGaussian(mu, 0.2, min=self.min, max=self.max)
+        scale = torch.sigmoid(self.scale(state))
+        return ScaledTanhTransformedGaussian(mu, scale, min=self.min, max=self.max)
 
 
 class TransitionModel(nn.Module):
     def __init__(self, input_dim, hidden_dim, output_dim, layers=1, dropout=0.2):
         super().__init__()
+        self.dropout = dropout
         self.lstm = nn.LSTM(input_dim, hidden_dim, layers, dropout=dropout)
         self.outnet = nn.Linear(hidden_dim, output_dim, bias=False)
+
+    def dropout_off(self):
+        self._force_dropout(0)
+
+    def dropout_on(self):
+        self._force_dropout(self.dropout)
+
+    def _force_dropout(self, dropout):
+        for name, module in self.named_modules():
+            if isinstance(module, nn.Dropout):
+                module.p = dropout
+
+            elif isinstance(module, nn.LSTM):
+                module.dropout = dropout
+
+            elif isinstance(module, nn.GRU):
+                module.dropout = dropout
 
     def forward(self, inp, hx=None):
         output, hx = self.lstm(inp, hx)
@@ -151,11 +154,16 @@ class LunarLanderViz:
 
     def plot_rewards_histogram(self, b, R):
         with torch.no_grad():
-            r = np.concatenate([b.trajectories[t][i].reward for t, i in b.index])
-            s = np.stack([b.trajectories[t][i].state for t, i in b.index])
-
+            if len(b.index) < 5000:
+                index = b.index
+            else:
+                index = sample(b.index, 5000)
+            r = np.concatenate([b.trajectories[t][i].reward for t, i in index])
+            s = np.stack([b.trajectories[t][i].state for t, i in index])
+            R.eval()
             pr = R(torch.from_numpy(s).to(device=args.device))
             pr = pr.cpu().detach().numpy()
+            R.train()
 
             self.rew_hist.clear()
             self.rew_hist.hist(r, bins=100)
@@ -193,6 +201,8 @@ def gather_experience(buff, episode, env, policy, eps=0.0, eps_policy=None, rend
         def get_action(state, reward, done):
             if random() >= eps:
                 action = policy(env.connector.policy_prepro(state, args.device).unsqueeze(0)).rsample()
+                action = Normal(action, 0.3).sample()
+                action = action.clamp(min=-1.0, max=1.0)
             else:
                 action = eps_policy(env.connector.policy_prepro(state, args.device).unsqueeze(0)).rsample()
             action = env.connector.action_prepro(action)
@@ -204,6 +214,7 @@ def gather_experience(buff, episode, env, policy, eps=0.0, eps_policy=None, rend
                         None)
             if render:
                 env.render()
+                time.sleep(0.01)
             return action
 
         action = get_action(state, reward, done)
@@ -238,13 +249,14 @@ def main(args):
 
     # environment
     env = gym.make(args.env)
+    env.render()
 
     def normalize_reward(reward):
         return reward / 100.0
 
-    env = gym.wrappers.TransformReward(env, normalize_reward)
+    #env = gym.wrappers.TransformReward(env, normalize_reward)
 
-    env.connector = LunarLanderConnector
+    env.connector = PyBulletConnector(env.action_space.shape[0])
 
     args.state_dims = env.observation_space.shape[0]
     args.action_dims = env.action_space.shape[0]
@@ -299,13 +311,19 @@ def main(args):
 
         for c in range(args.collect_interval):
 
+            sample_train_buff = SubsetSequenceBuffer(train_buff, 50, 40)
+            sample_test_buff = SubsetSequenceBuffer(test_buff, 50, 40)
+
             scr.update_progressbar(c)
             scr.update_slot('wandb', f'{wandb.run.name} {wandb.run.project} {wandb.run.id}')
+            scr.update_slot('buffer_stats', f'train_buff size {len(sample_train_buff)}')
 
             # Dynamics learning
-            train, test = SARNextSubSequenceDataset(train_buff, mask_f=None), SARNextSubSequenceDataset(test_buff, mask_f=None)
+            train, test = SARNextDataset(sample_train_buff, mask_f=None), SARNextDataset(sample_test_buff, mask_f=None)
             train = DataLoader(train, batch_size=args.batch_size, collate_fn=pad_collate_2, shuffle=True)
             test = DataLoader(test, batch_size=args.batch_size, collate_fn=pad_collate_2, shuffle=True)
+
+            T.dropout_on()
 
             # train transition model
             for trajectories in train:
@@ -321,6 +339,8 @@ def main(args):
                 scr.update_slot('transition_train', f'Transition training loss {loss.item()}')
                 wandb.log({'transition_train': loss.item()})
                 T_saver.checkpoint(T, T_optim)
+
+            T.dropout_off()
 
             for trajectories in test:
                 input = torch.cat((trajectories.state, trajectories.action), dim=2).to(args.device)
@@ -338,8 +358,6 @@ def main(args):
                                      title='predicted')
                     scr.update_table(trajectories.action[10:20, 0, :].detach().cpu().numpy().T, h=16,
                                      title='action')
-
-            train, test = SimpleRewardDataset(train_buff), SimpleRewardDataset(test_buff)
 
             def weights(b, log=False):
                 count = {'0.2': 0, '-1': 0, 'other': 0}
@@ -374,11 +392,17 @@ def main(args):
 
                 return wghts
 
-            train_weights, test_weights = weights(train_buff, log=True), weights(test_buff)
-            train_sampler = WeightedRandomSampler(train_weights, len(train_weights), replacement=True)
-            test_sampler = WeightedRandomSampler(test_weights, len(test_weights), replacement=True)
-            train = DataLoader(train, batch_size=256, sampler=train_sampler)
-            test = DataLoader(test, batch_size=256, sampler=test_sampler)
+            # train_weights, test_weights = weights(sample_train_buff, log=True), weights(sample_test_buff)
+            # train_sampler = WeightedRandomSampler(train_weights, len(train_weights), replacement=True)
+            # test_sampler = WeightedRandomSampler(test_weights, len(test_weights), replacement=True)
+            # train = DataLoader(train, batch_size=40*50, sampler=train_sampler)
+            # test = DataLoader(test, batch_size=40*50, sampler=test_sampler)
+
+            train, test = SimpleRewardDataset(sample_train_buff), SimpleRewardDataset(sample_test_buff)
+            train = DataLoader(train, batch_size=40*50, shuffle=True)
+            test = DataLoader(test, batch_size=40*50, shuffle=True)
+
+            R.train()
 
             for state, reward in train:
                 R_optim.zero_grad()
@@ -391,6 +415,8 @@ def main(args):
                 scr.update_slot('reward_train', f'Reward train loss {loss.item()}')
                 wandb.log({'reward_train': loss.item()})
                 R_saver.checkpoint(R, R_optim)
+
+            R.eval()
 
             for state, reward in test:
                 # dist = R(state.to(args.device))
@@ -446,8 +472,8 @@ def main(args):
             #         loss = F.binary_cross_entropy_with_logits(predicted_done, done)
 
             # Behaviour learning
-            train = ConcatDataset([SARDataset(train_buff)])
-            train = DataLoader(train, batch_size=args.batch_size, collate_fn=pad_collate_2, shuffle=True)
+            train = ConcatDataset([SARDataset(sample_train_buff)])
+            train = DataLoader(train, batch_size=args.batch_size * 40, collate_fn=pad_collate_2, shuffle=True)
 
             for trajectory in train:
                 imagine = [torch.cat((trajectory.state, trajectory.action), dim=2).to(args.device)]
@@ -559,11 +585,12 @@ def main(args):
                 value_saver.checkpoint(value, value_optim)
                 value_saver.save_if_best(value_loss, value)
 
+
         "run the policy on the environment and collect experience"
         sampled_rewards = []
         for _ in range(10):
             train_buff, reward = gather_experience(train_buff, train_episode, env, policy,
-                                                   eps=eps, eps_policy=env.connector.random_policy,
+                                                   eps=0.0, eps_policy=env.connector.random_policy,
                                                    render=render_cooldown())
             wandb.log({'reward': reward})
             sampled_rewards.append(reward)
@@ -581,9 +608,9 @@ def main(args):
 
         viz.plot_rewards_histogram(train_buff, R)
 
-        if random() < 1.0:
+        for _ in range(3):
             test_buff, reward = gather_experience(test_buff, test_episode, env, policy,
-                                                  eps=eps, eps_policy=env.connector.random_policy,
+                                                  eps=0.0, eps_policy=env.connector.random_policy,
                                                   render=False)
             test_episode += 1
 
@@ -605,7 +632,7 @@ def demo(args):
 
     env = gym.wrappers.TransformReward(env, normalize_reward)
 
-    env.connector = LunarLanderConnector
+    env.connector = PyBulletConnector(env.action_space.shape[0])
 
     args.state_dims = env.observation_space.shape[0]
     args.action_dims = env.action_space.shape[0]
@@ -632,20 +659,20 @@ def demo(args):
 
 if __name__ == '__main__':
     args = {'seed_episodes': 5,
-            'collect_interval': 1,
-            'batch_size': 8,
+            'collect_interval': 100,
+            'batch_size': 32,
             'device': 'cuda:1',
             'horizon': 15,
             'discount': 0.99,
             'lam': 0.95,
-            'lr': 1e-3,
+            'lr': 1e-4,
             'policy_hidden_dims': [300],
             'value_hidden_dims': [300],
             'reward_hidden_dims': [300, 300],
             'nonlin': 'nn.ELU',
             'transition_layers': 2,
             'transition_hidden_dim': 64,
-            'env': 'LunarLanderContinuous-v3',
+            'env': 'InvertedPendulumSwingupPyBulletEnv-v0',
             'demo': 'off',
             'seed': None
             }
