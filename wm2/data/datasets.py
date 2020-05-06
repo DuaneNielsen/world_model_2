@@ -28,7 +28,6 @@ class Buffer:
         self.rewards_count = 0
         self.done_count = 0
         self.steps_count = 0
-        #self.action_max = 0
 
     def append(self, traj_id, state, action, reward, done, info):
         """subclass and override this method to get different buffer write behavior"""
@@ -46,8 +45,11 @@ class Buffer:
             self.rewards_count += 1
         if done:
             self.done_count += 1
-        # if action > self.action_max:
-        #     self.action_max = action
+            p_cont_d = 1.0 / (len(self.trajectories[traj_id]) - 1)
+            pcont = 1.0
+            for step in self.trajectories[traj_id]:
+                step.pcont = pcont
+                pcont -= p_cont_d
 
     def get_step(self, item):
         traj_id, step_id = self.index[item]
@@ -90,14 +92,17 @@ class SubsetSequenceBuffer:
     def __init__(self, b, num_trajectories, length):
         rnd = np.random.RandomState()
         self.trajectories = []
-        for i in rnd.choice(len(b), num_trajectories):
-            trajectory = b.trajectories[i]
-            available = len(trajectory) - length + 1
-            if available < 1:
-                continue
-            else:
-                start = rnd.randint(0, available)
-                self.trajectories.append(b.trajectories[i][start:start+length])
+        self.rejects = 0
+        while len(self.trajectories) < num_trajectories:
+            for i in rnd.choice(len(b), 1):
+                trajectory = b.trajectories[i]
+                available = len(trajectory) - length + 1
+                if available < 1:
+                    self.rejects += 1
+                    continue
+                else:
+                    start = rnd.randint(0, available)
+                    self.trajectories.append(b.trajectories[i][start:start+length])
 
         self.index = []
         for i, t in enumerate(self.trajectories):
@@ -126,7 +131,7 @@ class SARDataset(Dataset):
 
     def __getitem__(self, item):
         trajectory = self.b.trajectories[item]
-        state, reward, action, mask = [], [], [], []
+        state, reward, action, mask, pcont = [], [], [], [], []
         for step in trajectory:
             state += [step.state]
             reward += [step.reward]
@@ -134,13 +139,18 @@ class SARDataset(Dataset):
             #     action += [one_hot(step.action, self.b.action_max)]
             # else:
             action += [step.action]
+            pcont += [step.pcont]
 
         astack = np.stack(action)
+        pcont = np.stack(pcont)
+        pcont = pcont[:, np.newaxis]
 
         return {'state': np.stack(state),
                 'action': astack,
                 'reward': np.stack(reward),
-                'mask': self.mask_f(state, reward, action)}
+                'mask': self.mask_f(state, reward, action),
+                'pcont': pcont
+                }
 
 
 class SARNextDataset(Dataset):

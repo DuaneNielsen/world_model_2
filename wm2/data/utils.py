@@ -13,6 +13,7 @@ class SARI:
         self.has_reward = reward != 0
         self.done = done
         self.info = info
+        self.pcont = 0
 
 
 def one_hot(a, max, dtype=np.float32):

@@ -21,7 +21,10 @@ class PyBulletConnector:
 
     @staticmethod
     def action_prepro(action):
-        return action.detach().cpu().squeeze().unsqueeze(0).numpy().astype(np.float32)
+        if action.shape[0] == 1:
+            return action.detach().cpu().squeeze().unsqueeze(0).numpy().astype(np.float32)
+        else:
+            return action.detach().cpu().squeeze().numpy().astype(np.float32)
 
     def random_policy(self, state):
         mu = torch.zeros((self.action_dims,))
