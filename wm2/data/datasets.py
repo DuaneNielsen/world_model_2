@@ -1,6 +1,7 @@
 import random
 from collections import deque
 from time import sleep
+import math
 
 import numpy as np
 import torch
@@ -22,12 +23,13 @@ class DummyBuffer:
 
 
 class Buffer:
-    def __init__(self):
+    def __init__(self, p_cont_algo='exp'):
         self.trajectories = []
         self.index = []
         self.rewards_count = 0
         self.done_count = 0
         self.steps_count = 0
+        self.p_cont_algo = p_cont_algo
 
     def append(self, traj_id, state, action, reward, done, info):
         """subclass and override this method to get different buffer write behavior"""
@@ -45,11 +47,17 @@ class Buffer:
             self.rewards_count += 1
         if done:
             self.done_count += 1
-            p_cont_d = 1.0 / (len(self.trajectories[traj_id]) - 1)
-            pcont = 1.0
-            for step in self.trajectories[traj_id]:
-                step.pcont = pcont
-                pcont -= p_cont_d
+            if self.p_cont_algo == 'linear':
+                p_cont_d = 1.0 / (len(self.trajectories[traj_id]) - 1)
+                pcont = 1.0
+                for step in self.trajectories[traj_id]:
+                    step.pcont = pcont
+                    pcont -= p_cont_d
+            elif self.p_cont_algo == 'exp':
+                pcont_np = np.linspace(0, math.e, len(self.trajectories[traj_id]))
+                pcont_np = 1/np.exp(pcont_np)
+                for step, pcont in zip(self.trajectories[traj_id], pcont_np):
+                    step.pcont = pcont
 
     def get_step(self, item):
         traj_id, step_id = self.index[item]

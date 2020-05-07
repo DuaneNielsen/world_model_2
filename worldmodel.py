@@ -5,6 +5,7 @@ import curses
 import argparse
 from random import sample
 import time
+import pathlib
 
 import torch
 import torch.nn as nn
@@ -185,6 +186,29 @@ def reward_mask_f(state, reward, action):
     return nonzero[:, np.newaxis]
 
 
+class HistogramPanel:
+    def __init__(self, fig, fig_index, label):
+        self.fig = fig
+        self.hist = fig.add_subplot(fig_index)
+        self.hist.hist(np.zeros((1,)), label=label)
+        self.hist.relim()
+        self.hist.autoscale_view()
+        self.hist.legend()
+
+    def update(self, data, bins=100):
+        """
+        update the histogram
+        :param data: numpy array of dim 1
+        :return:
+        """
+        self.hist.clear()
+        self.hist.hist(data, bins=bins)
+        self.hist.set_yscale('log')
+        self.hist.relim()
+        self.hist.autoscale_view()
+        self.fig.canvas.draw()
+
+
 class LunarLanderViz:
     def __init__(self):
         plt.ion()
@@ -194,17 +218,19 @@ class LunarLanderViz:
         self.rew_live_length = 1000
         self.rewards = deque(maxlen=self.rew_live_length)
 
-        self.rew_hist = self.fig.add_subplot(222)
-        self.rew_hist.hist(np.zeros((1,)), label='reward')
-        self.rew_hist.relim()
-        self.rew_hist.autoscale_view()
-        self.rew_hist.legend()
+        self.rew_hist = HistogramPanel(self.fig, 222, label='reward')
+        # self.rew_hist = self.fig.add_subplot(222)
+        # self.rew_hist.hist(np.zeros((1,)), label='reward')
+        # self.rew_hist.relim()
+        # self.rew_hist.autoscale_view()
+        # self.rew_hist.legend()
 
-        self.prew_hist = self.fig.add_subplot(224)
-        self.prew_hist.hist(np.zeros((1,)), label='predicted reward')
-        self.prew_hist.relim()
-        self.prew_hist.autoscale_view()
-        self.rew_hist.legend()
+        self.prew_hist = HistogramPanel(self.fig, 224, label='predicted_reward')
+        # self.prew_hist = self.fig.add_subplot(224)
+        # self.prew_hist.hist(np.zeros((1,)), label='predicted reward')
+        # self.prew_hist.relim()
+        # self.prew_hist.autoscale_view()
+        # self.rew_hist.legend()
 
         self.fig.canvas.draw()
 
@@ -221,18 +247,8 @@ class LunarLanderViz:
             pr = pr.cpu().detach().numpy()
             R.train()
 
-            self.rew_hist.clear()
-            self.rew_hist.hist(r, bins=100)
-            self.rew_hist.set_yscale('log')
-            self.rew_hist.relim()
-            self.rew_hist.autoscale_view()
-
-            self.prew_hist.clear()
-            self.prew_hist.hist(pr, bins=100)
-            self.prew_hist.set_yscale('log')
-            self.prew_hist.relim()
-            self.prew_hist.autoscale_view()
-
+            self.rew_hist.update(r, bins=100)
+            self.prew_hist.update(pr, bins=100)
             self.fig.canvas.draw()
 
     def update_rewards(self, reward):
@@ -245,7 +261,7 @@ class LunarLanderViz:
         self.fig.canvas.draw()
 
 
-def gather_experience(buff, episode, env, policy, eps=0.0, eps_policy=None, render=True, seed=None):
+def gather_experience(buff, episode, env, policy, eps=0.0, eps_policy=None, expln_noise=0.0, render=True, seed=None, delay=0.01):
     with torch.no_grad():
         # gather new experience
         episode_reward = 0.0
@@ -257,7 +273,7 @@ def gather_experience(buff, episode, env, policy, eps=0.0, eps_policy=None, rend
         def get_action(state, reward, done):
             if random() >= eps:
                 action = policy(env.connector.policy_prepro(state, args.device).unsqueeze(0)).rsample()
-                action = Normal(action, args.exploration_noise).sample()
+                action = Normal(action, expln_noise).sample()
                 action = action.clamp(min=-1.0, max=1.0)
             else:
                 action = eps_policy(env.connector.policy_prepro(state, args.device).unsqueeze(0)).rsample()
@@ -270,7 +286,7 @@ def gather_experience(buff, episode, env, policy, eps=0.0, eps_policy=None, rend
                         None)
             if render:
                 env.render()
-                time.sleep(0.01)
+                time.sleep(delay)
             return action
 
         action = get_action(state, reward, done)
@@ -325,12 +341,13 @@ def main(args):
     env = gym.make(args.env)
     env.render()
 
-    def normalize_reward(reward):
-        return reward / 100.0
-
-    #env = gym.wrappers.TransformReward(env, normalize_reward)
+    # def normalize_reward(reward):
+    #     return reward / 100.0
+    #
+    # env = gym.wrappers.TransformReward(env, normalize_reward)
 
     env.connector = PyBulletConnector(env.action_space.shape[0])
+    #env.connector = LunarLanderConnector
 
     args.state_dims = env.observation_space.shape[0]
     args.action_dims = env.action_space.shape[0]
@@ -681,7 +698,7 @@ def main(args):
         for _ in range(1):
             train_buff, reward = gather_experience(train_buff, train_episode, env, policy,
                                                    eps=0.0, eps_policy=env.connector.random_policy,
-                                                   render=render_cooldown())
+                                                   render=render_cooldown(), expln_noise=args.exploration_noise)
             wandb.log({'reward': reward})
             sampled_rewards.append(reward)
             viz.update_rewards(reward)
@@ -701,14 +718,8 @@ def main(args):
         for _ in range(1):
             test_buff, reward = gather_experience(test_buff, test_episode, env, policy,
                                                   eps=0.0, eps_policy=env.connector.random_policy,
-                                                  render=False)
+                                                  render=False, expln_noise=args.exploration_noise)
             test_episode += 1
-
-        # boost or decrease exploration if no reward
-        if mean(recent_reward) == 0 and eps < 0.5:
-            eps += 0.05
-        if mean(recent_reward) > 0.5 and eps > 0.05:
-            eps -= 0.05
 
         converged = False
 
@@ -720,9 +731,10 @@ def demo(args):
     def normalize_reward(reward):
         return reward / 100.0
 
-    env = gym.wrappers.TransformReward(env, normalize_reward)
+    #env = gym.wrappers.TransformReward(env, normalize_reward)
 
     env.connector = PyBulletConnector(env.action_space.shape[0])
+    env.render()
 
     args.state_dims = env.observation_space.shape[0]
     args.action_dims = env.action_space.shape[0]
@@ -735,7 +747,7 @@ def demo(args):
     policy = Policy(layers=[args.state_dims, *args.policy_hidden_dims, args.action_dims], min=args.action_min,
                     max=args.action_max).to(args.device)
 
-    wandb_run_dir = args.demo
+    wandb_run_dir = str(next(pathlib.Path().glob(f'wandb/*{args.demo}')))
 
     while True:
         load_dict = wm2.utils.SaveLoad.best(wandb_run_dir, 'policy')
@@ -744,31 +756,32 @@ def demo(args):
         print(f'best_loss {loss}')
         train_buff, reward = gather_experience(dummy_buffer, 0, env, policy,
                                                eps=0.0, eps_policy=env.connector.random_policy,
-                                               render=True)
+                                               render=True, delay=0.1)
 
 
 if __name__ == '__main__':
-    args = {'seed_episodes': 50,
+    args = {'seed_episodes': 5,
             'collect_interval': 10,
             'batch_size': 40,
-            'device': 'cuda:1',
-            'horizon': 8,
+            'device': 'cuda:0',
+            'horizon': 15,
             'discount': 0.99,
             'lam': 0.95,
-            'lr': 1e-3,
-            'model_lr': 1e-3,
-            'value_lr': 1e-4,
-            'policy_lr': 1e-4,
+            'lr': 1e-4,
+            'model_lr': 1e-4,
+            'value_lr': 2e-5,
+            'policy_lr': 2e-5,
             'policy_hidden_dims': [48, 48],
             'value_hidden_dims': [300],
             'reward_hidden_dims': [300, 300],
             'nonlin': 'nn.ELU',
             'transition_layers': 1,
             'transition_hidden_dim': 48,
-            'env': 'InvertedPendulumPyBulletEnv-v0',
+            #'env': 'HopperPyBulletEnv-v0',
+            'env': 'HalfCheetahPyBulletEnv-v0',
             'demo': 'off',
             'seed': None,
-            'exploration_noise': 0.1
+            'exploration_noise': 0.2
             }
 
     parser = argparse.ArgumentParser()

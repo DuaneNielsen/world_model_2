@@ -21,14 +21,14 @@ class PyBulletConnector:
 
     @staticmethod
     def action_prepro(action):
-        if action.shape[0] == 1:
+        if action.shape[1] == 1:
             return action.detach().cpu().squeeze().unsqueeze(0).numpy().astype(np.float32)
         else:
             return action.detach().cpu().squeeze().numpy().astype(np.float32)
 
     def random_policy(self, state):
-        mu = torch.zeros((self.action_dims,))
-        scale = torch.full((self.action_dims,), 0.5)
+        mu = torch.zeros((1, self.action_dims,))
+        scale = torch.full((1, self.action_dims,), 0.5)
         return ScaledTanhTransformedGaussian(mu, scale)
 
     @staticmethod
