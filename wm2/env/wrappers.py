@@ -217,3 +217,23 @@ class ActionBranches(gym.Wrapper):
         state, rew, done, info = self.env.step(action)
         info['alternates'] = alternates
         return state, rew, done, info
+
+
+class ConcatPrev(gym.Wrapper):
+    def __init__(self, env):
+        super().__init__(env)
+        self.prev_obs = None
+        #shape = self.unwrapped.observation_space.shape[0] * 2
+        low = np.concatenate((self.unwrapped.observation_space.low, self.unwrapped.observation_space.low))
+        high = np.concatenate((self.unwrapped.observation_space.high, self.unwrapped.observation_space.high))
+        self.observation_space = spaces.Box(low=low, high=high, dtype=np.float32)
+
+    def reset(self):
+        self.prev_obs = self.env.reset()
+        return np.concatenate((self.prev_obs, self.prev_obs))
+
+    def step(self, action):
+        raw_state, rew, done, info = self.env.step(action)
+        state = np.concatenate((raw_state, self.prev_obs))
+        self.prev_obs = raw_state
+        return state, rew, done, info

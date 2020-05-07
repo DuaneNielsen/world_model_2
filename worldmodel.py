@@ -30,6 +30,7 @@ from wm2.data.datasets import Buffer, SARDataset, SARNextDataset, SimpleRewardDa
 from wm2.utils import Pbar
 from data.utils import pad_collate_2
 import wm2.utils
+import wm2.env.wrappers
 from wm2.env.LunarLander_v3 import LunarLanderConnector
 from wm2.env.pybullet import PyBulletConnector
 
@@ -322,6 +323,20 @@ def log_prob_loss(trajectories, predicted_state):
     log_p = predicted_state.log_prob(trajectories.next_state.to(args.device)).mean()
     return div * 1.0 - log_p
 
+def make_env():
+    # environment
+    env = gym.make(args.env)
+    env = wm2.env.wrappers.ConcatPrev(env)
+    env.render()
+
+    # def normalize_reward(reward):
+    #     return reward / 100.0
+    #
+    # env = gym.wrappers.TransformReward(env, normalize_reward)
+
+    env.connector = PyBulletConnector(env.action_space.shape[0])
+    #env.connector = LunarLanderConnector
+    return env
 
 def main(args):
     # curses
@@ -337,17 +352,7 @@ def main(args):
     # viz
     viz = LunarLanderViz()
 
-    # environment
-    env = gym.make(args.env)
-    env.render()
-
-    # def normalize_reward(reward):
-    #     return reward / 100.0
-    #
-    # env = gym.wrappers.TransformReward(env, normalize_reward)
-
-    env.connector = PyBulletConnector(env.action_space.shape[0])
-    #env.connector = LunarLanderConnector
+    env = make_env()
 
     args.state_dims = env.observation_space.shape[0]
     args.action_dims = env.action_space.shape[0]
@@ -725,15 +730,8 @@ def main(args):
 
 
 def demo(args):
-    env = gym.make(args.env)
-    env = gym.wrappers.TimeLimit(env, max_episode_steps=1000)
 
-    def normalize_reward(reward):
-        return reward / 100.0
-
-    #env = gym.wrappers.TransformReward(env, normalize_reward)
-
-    env.connector = PyBulletConnector(env.action_space.shape[0])
+    env = make_env()
     env.render()
 
     args.state_dims = env.observation_space.shape[0]
