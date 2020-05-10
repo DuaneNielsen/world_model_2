@@ -8,6 +8,7 @@ import time
 import pathlib
 import yaml
 import re
+import types
 
 import torch
 import torch.nn as nn
@@ -934,10 +935,10 @@ if __name__ == '__main__':
         if argument == 'seed':
             parser.add_argument('--' + argument, type=int, required=False, default=None)
         elif argument == 'config':
-            parser.add_argument('--' + argument, type=str, required=False, default=None)
+            parser.add_argument('--' + argument, type=str, required=True, default=None)
         else:
-            parser.add_argument('--' + argument, type=type(value), required=False, default=value)
-    args = parser.parse_args()
+            parser.add_argument('--' + argument, type=type(value), required=False, default=None)
+    command_line = parser.parse_args()
 
     """ 
     required due to https://github.com/yaml/pyyaml/issues/173
@@ -968,25 +969,28 @@ if __name__ == '__main__':
 
 
     yaml_conf = {}
-    if args.config is not None:
-        with pathlib.Path(args.config).open() as f:
-            yaml_conf = yaml.load(f, Loader=yaml.FullLoader)
+    if command_line.config is not None:
+        with pathlib.Path(command_line.config).open() as f:
+            yaml_conf = yaml.load(f, Loader=loader)
             yaml_conf = flatten(yaml_conf)
 
+    args = {}
     """ precedence is command line, config file, default """
-    for key, value in defaults.items():
-        if key in args:
-            pass
+    for key, value in vars(command_line).items():
+        if value is not None:
+            args[key] = vars(command_line)[key]
         elif key in yaml_conf:
-            vars(args)[key] = yaml_conf[key]
+            args[key] = yaml_conf[key]
         else:
-            vars(args)[key] = defaults[key]
+            args[key] = defaults[key]
+
+    args = types.SimpleNamespace(**args)
 
     if args.seed is not None:
         determinism(args.seed)
 
     if args.demo == 'off':
-        wandb.init(config=args)
+        wandb.init(config=vars(args))
         curses.wrapper(main(args))
     else:
         demo(args)

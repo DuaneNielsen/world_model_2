@@ -49,7 +49,7 @@ class Buffer:
         if done:
             self.done_count += 1
             """ append terminal sequence """
-            #state, reward, done, info = state, reward, True, None
+            state, reward, done, info = state, np.zeros_like(reward), True, None
             for _ in range(self.horizon):
                 self.trajectories[traj_id].append(SARI(state, action, reward, done, info))
 
