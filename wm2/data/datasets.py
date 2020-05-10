@@ -23,13 +23,14 @@ class DummyBuffer:
 
 
 class Buffer:
-    def __init__(self, p_cont_algo='exp'):
+    def __init__(self, p_cont_algo='invexp', horizon=15):
         self.trajectories = []
         self.index = []
         self.rewards_count = 0
         self.done_count = 0
         self.steps_count = 0
         self.p_cont_algo = p_cont_algo
+        self.horizon = horizon
 
     def append(self, traj_id, state, action, reward, done, info):
         """subclass and override this method to get different buffer write behavior"""
@@ -47,6 +48,11 @@ class Buffer:
             self.rewards_count += 1
         if done:
             self.done_count += 1
+            """ append terminal sequence """
+            #state, reward, done, info = state, reward, True, None
+            for _ in range(self.horizon):
+                self.trajectories[traj_id].append(SARI(state, action, reward, done, info))
+
             if self.p_cont_algo == 'linear':
                 p_cont_d = 1.0 / (len(self.trajectories[traj_id]) - 1)
                 pcont = 1.0
@@ -58,6 +64,13 @@ class Buffer:
                 pcont_np = 1/np.exp(pcont_np)
                 for step, pcont in zip(self.trajectories[traj_id], pcont_np):
                     step.pcont = pcont
+            elif self.p_cont_algo == 'invexp':
+                pcont_np = np.linspace(math.e, 0, len(self.trajectories[traj_id]) - self.horizon)
+                pcont_np = 1.0 - 1.0 / 10.0 ** pcont_np
+                pcont_np = np.concatenate((pcont_np, np.zeros(self.horizon)))
+                for step, pcont in zip(self.trajectories[traj_id], pcont_np):
+                    step.pcont = pcont
+
 
     def get_step(self, item):
         traj_id, step_id = self.index[item]

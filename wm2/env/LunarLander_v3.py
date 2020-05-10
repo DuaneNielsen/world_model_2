@@ -504,3 +504,37 @@ class LunarLanderConnector:
         i = np.random.choice(r.shape[0], less_than_0_3.sum(), p=p)
         less_than_0_3[i] = True
         return less_than_0_3[:, np.newaxis]
+
+
+def weights(b, log=False, scr=None):
+    count = {'0.2': 0, '-1': 0, 'other': 0}
+    total = 0
+
+    for traj, t in b.index:
+        step = b.trajectories[traj][t]
+        total += 1
+        if step.reward > 0.20:
+            count['0.2'] += 1
+        elif step.reward <= -1.0:
+            count['-1'] += 1
+        else:
+            count['other'] += 1
+
+    probs = {}
+    for k, c in count.items():
+        if log:
+            scr.update_slot(f'{k}', f'{k} : {c}')
+        probs[k] = 1 / (3 * (c + eps))
+
+    wghts = []
+
+    for traj, t in b.index:
+        step = b.trajectories[traj][t]
+        if step.reward > 0.20:
+            wghts.append(probs['0.2'])
+        elif step.reward <= -1.0:
+            wghts.append(probs['-1'])
+        else:
+            wghts.append(probs['other'])
+
+    return wghts

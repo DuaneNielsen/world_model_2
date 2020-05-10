@@ -36,21 +36,29 @@ class SaveLoad:
             save['model'] = model.state_dict()
             torch.save(save, str(Path(wandb.run.dir) / Path(f'{self.label}_checkpoint.pt')))
 
-    def save_if_best(self, loss, model, mode='lowest'):
+    def is_best(self, loss, mode='lowest', store=True):
+        """ this function is rubbish and needs a rewrite"""
         loss = loss.item() if not type(float) else loss
         if self.best_loss is None:
-            self.best_loss = loss
+            if not store:
+                return False
+            else:
+                self.best_loss = loss
         improved = loss < self.best_loss if mode == 'lowest' else loss > self.best_loss
-        if improved:
+        if improved and store:
             self.best_loss = loss
-            save = {}
-            save['model'] = model.state_dict()
-            save['loss'] = loss
-            torch.save(save, str(Path(wandb.run.dir) / Path(f'{self.label}_best.pt')))
+        return improved
+
+    def save(self, model, suffix, **kwargs):
+        save = {}
+        for arg, value in kwargs.items():
+            save[arg] = value
+        save['model'] = model.state_dict()
+        torch.save(save, str(Path(wandb.run.dir) / Path(f'{self.label}_{suffix}.pt')))
 
     @staticmethod
-    def best(wandb_run_dir, label):
-        f = str(Path(wandb_run_dir) / Path(f'{label}_best.pt'))
+    def load(wandb_run_dir, label, suffix):
+        f = str(Path(wandb_run_dir) / Path(f'{label}_{suffix}.pt'))
         return torch.load(f)
 
     @staticmethod

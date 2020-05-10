@@ -1,11 +1,13 @@
 from collections import deque
+import collections
 from statistics import mean
-from random import random
+import random
 import curses
 import argparse
-from random import sample
 import time
 import pathlib
+import yaml
+import re
 
 import torch
 import torch.nn as nn
@@ -15,6 +17,8 @@ from torch.distributions import Normal, Categorical
 from torch.distributions.mixture_same_family import MixtureSameFamily
 from torch.distributions.kl import kl_divergence
 from torch.nn.utils import clip_grad_norm_
+import torch.backends.cudnn
+import torch.cuda
 import numpy as np
 import wandb
 import gym
@@ -78,9 +82,9 @@ class Mixture(nn.Module):
 
 
 class Policy(nn.Module):
-    def __init__(self, layers, min=-1.0, max=1.0):
+    def __init__(self, layers, min=-1.0, max=1.0, nonlin=None):
         super().__init__()
-        self.mu = MLP(layers)
+        self.mu = MLP(layers, nonlin)
         self.scale = nn.Linear(layers[0], 1, bias=False)
         self.min = min
         self.max = max
@@ -176,6 +180,7 @@ class GRU(nn.Module):
         mu, sig = self.mu(mu), self.sig(sig) + 0.1
         return Normal(mu, sig), hidden
 
+
 def reward_mask_f(state, reward, action):
     r = np.concatenate(reward)
     nonzero = r != 0
@@ -188,15 +193,18 @@ def reward_mask_f(state, reward, action):
 
 
 class HistogramPanel:
-    def __init__(self, fig, fig_index, label):
+    def __init__(self, fig, panels, fig_index, label):
         self.fig = fig
-        self.hist = fig.add_subplot(fig_index)
+        self.label = label
+        self.hist = fig.add_subplot(*panels, fig_index, )
+        self.hist.set_title(self.label)
         self.hist.hist(np.zeros((1,)), label=label)
+        self.hist.legend(label)
         self.hist.relim()
         self.hist.autoscale_view()
         self.hist.legend()
 
-    def update(self, data, bins=100):
+    def update(self, data, bins=100, yscale='linear'):
         """
         update the histogram
         :param data: numpy array of dim 1
@@ -204,34 +212,79 @@ class HistogramPanel:
         """
         self.hist.clear()
         self.hist.hist(data, bins=bins)
-        self.hist.set_yscale('log')
+        self.hist.set_title(self.label)
+        self.hist.set_yscale(yscale)
         self.hist.relim()
         self.hist.autoscale_view()
         self.fig.canvas.draw()
 
 
-class LunarLanderViz:
+class PlotPanel:
+    def __init__(self, fig, panels, fig_index, label, length=1000):
+        self.fig = fig
+        self.label = label
+        self.plot = fig.add_subplot(*panels, fig_index, )
+        self.plot.set_title(self.label)
+
+    def update(self, sequence):
+        self.plot.set_title(self.label)
+        self.plot.plot(sequence)
+        self.plot.relim()
+        self.plot.autoscale_view()
+        self.fig.canvas.draw()
+
+    def reset(self):
+        self.plot.clear()
+        self.fig.canvas.draw()
+
+
+class LiveLine:
+    def __init__(self, fig, panels, fig_index, label, length=1000):
+        self.fig = fig
+        self.label = label
+        self.live = fig.add_subplot(*panels, fig_index, )
+        self.live.set_title(self.label)
+        self.rew_live_length = length
+        self.dq = deque(maxlen=self.rew_live_length)
+
+    def update(self, data):
+        self.live.clear()
+        self.dq.append(data)
+        y = np.array(self.dq)
+        self.live.set_title(self.label)
+        self.live.plot(y)
+        self.live.relim()
+        self.live.autoscale_view()
+        self.fig.canvas.draw()
+
+    def reset(self):
+        self.live.clear()
+        self.dq = deque(maxlen=self.rew_live_length)
+        self.fig.canvas.draw()
+
+
+class Viz:
     def __init__(self):
         plt.ion()
-        self.fig = plt.figure(num=None, figsize=(16, 12), dpi=80, facecolor='w', edgecolor='k')
+        self.fig = plt.figure(num=None, figsize=(18, 12), dpi=80, facecolor='w', edgecolor='k')
 
-        self.rew_live = self.fig.add_subplot(221)
-        self.rew_live_length = 1000
-        self.rewards = deque(maxlen=self.rew_live_length)
+        panels = (3, 5)
+        self.rew_plot = LiveLine(self.fig, panels, 1, label='episode reward')
 
-        self.rew_hist = HistogramPanel(self.fig, 222, label='reward')
-        # self.rew_hist = self.fig.add_subplot(222)
-        # self.rew_hist.hist(np.zeros((1,)), label='reward')
-        # self.rew_hist.relim()
-        # self.rew_hist.autoscale_view()
-        # self.rew_hist.legend()
+        self.dynamics_hist = HistogramPanel(self.fig, panels, 2, label='dynamics')
+        self.rew_hist = HistogramPanel(self.fig, panels, 3, label='reward')
+        self.prew_hist = HistogramPanel(self.fig, panels, 4, label='predicted_reward')
+        self.raw_pcont_hist = HistogramPanel(self.fig, panels, 5, label='measured pcont')
+        self.est_pcont_hist = HistogramPanel(self.fig, panels, 6, label='est pcont')
+        self.value_hist = HistogramPanel(self.fig, panels, 7, label='value')
 
-        self.prew_hist = HistogramPanel(self.fig, 224, label='predicted_reward')
-        # self.prew_hist = self.fig.add_subplot(224)
-        # self.prew_hist.hist(np.zeros((1,)), label='predicted reward')
-        # self.prew_hist.relim()
-        # self.prew_hist.autoscale_view()
-        # self.rew_hist.legend()
+        self.policy_grad_norm = LiveLine(self.fig, panels, 8, label='policy gradient')
+
+        self.live_value = PlotPanel(self.fig, panels, fig_index=9, label='episode value')
+        self.live_reward = PlotPanel(self.fig, panels, fig_index=12, label='episode reward')
+        self.live_pcont = PlotPanel(self.fig, panels, fig_index=10, label='pcont')
+        self.exp_rew_vs_actual = PlotPanel(self.fig, panels, fig_index=11, label='reward: exp vs actual')
+        self.live_dynamics = PlotPanel(self.fig, panels, fig_index=13, label='episode dynamics')
 
         self.fig.canvas.draw()
 
@@ -240,7 +293,7 @@ class LunarLanderViz:
             if len(b.index) < 5000:
                 index = b.index
             else:
-                index = sample(b.index, 5000)
+                index = random.sample(b.index, 5000)
             r = np.concatenate([b.trajectories[t][i].reward for t, i in index])
             s = np.stack([b.trajectories[t][i].state for t, i in index])
             R.eval()
@@ -248,21 +301,120 @@ class LunarLanderViz:
             pr = pr.cpu().detach().numpy()
             R.train()
 
-            self.rew_hist.update(r, bins=100)
-            self.prew_hist.update(pr, bins=100)
+            self.rew_hist.update(r, bins=100, yscale='log')
+            self.prew_hist.update(pr, bins=100, yscale='log')
             self.fig.canvas.draw()
 
     def update_rewards(self, reward):
-        self.rewards.append(reward)
-        y = np.array(self.rewards)
-        self.rew_live.clear()
-        self.rew_live.plot(y)
-        self.rew_live.relim()
-        self.rew_live.autoscale_view()
-        self.fig.canvas.draw()
+        self.rew_plot.update(reward)
+
+    def _draw_samples(self, b):
+        if len(b.index) < 5000:
+            index = b.index
+        else:
+            index = random.sample(b.index, 5000)
+        return index
+
+    def update_pcont(self, b, pcont):
+        with torch.no_grad():
+            index = self._draw_samples(b)
+            s = np.stack([b.trajectories[t][i].state for t, i in index])
+            pcont_raw = np.stack([b.trajectories[t][i].pcont for t, i in index])
+            pred_pcont = pcont(torch.from_numpy(s).to(device=args.device))
+            self.raw_pcont_hist.update(pcont_raw, bins=100, yscale='log')
+            self.est_pcont_hist.update(pred_pcont.cpu().detach().numpy(), bins=100, yscale='log')
+
+    def update_value(self, b, value):
+        with torch.no_grad():
+            index = self._draw_samples(b)
+            s = np.stack([b.trajectories[t][i].state for t, i in index])
+            pred_value = value(torch.from_numpy(s).to(device=args.device))
+            self.value_hist.update(pred_value.cpu().detach().numpy(), bins=100, yscale='log')
+
+    def update_trajectory_plots(self, value, R, pcont, T, b, trajectory_id):
+        with torch.no_grad():
+            self.live_value.reset(), self.live_pcont.reset(), self.exp_rew_vs_actual.reset()
+            self.live_reward.reset(), self.live_dynamics.reset()
+            s = np.stack(i.state for i in b.trajectories[trajectory_id])
+            a = np.stack(i.action for i in b.trajectories[trajectory_id])
+            r = np.stack(i.reward for i in b.trajectories[trajectory_id])
+            p = np.stack(i.pcont for i in b.trajectories[trajectory_id])
+            s = torch.from_numpy(s).to(device=args.device)
+            a = torch.from_numpy(a).to(device=args.device)
+            self.update_episode_reward(R, s, r)
+            self.update_episode_pcont(pcont, s, p)
+            self.update_episode_expected_reward(T, R, s, a, r)
+            self.update_episode_value(value, s)
+            self.update_episode_dynamics(T, s, a)
+
+    def update_episode_reward(self, R, s, r):
+        with torch.no_grad():
+            pr = R(s).squeeze().cpu().numpy()
+            self.live_reward.update(pr)
+            self.live_reward.update(r)
+
+    def update_episode_value(self, value, s):
+        with torch.no_grad():
+            v = value(s).squeeze().cpu().numpy()
+            self.live_value.update(v)
+
+    def update_episode_pcont(self, pcont, s, p):
+        with torch.no_grad():
+            pc = pcont(s).squeeze().cpu().numpy()
+            self.live_pcont.update(pc)
+            self.live_pcont.update(p)
+
+    def update_episode_expected_reward(self, T, R, s, a, r):
+        with torch.no_grad():
+            sa = torch.cat((s, a), dim=1)
+            pred_next_dist, hx = T(sa.unsqueeze(1))
+            next_state = pred_next_dist.loc.squeeze()
+            pr = R(next_state).cpu().numpy()
+            self.exp_rew_vs_actual.update(pr)
+            self.exp_rew_vs_actual.update(r)
+
+    def update_episode_dynamics(self, T, s, a):
+        with torch.no_grad():
+            sa = torch.cat((s[:-1], a[:-1]), dim=1)
+            dist, hx = T(sa.unsqueeze(1))
+            lp = torch.exp(dist.log_prob(s[1:].unsqueeze((1)))).squeeze().mean(1)
+            lp = lp.squeeze().cpu().numpy()
+            self.live_dynamics.update(lp)
+
+    def sample_grad_norm(self, model, sample=0.05):
+        if random.random() < sample:
+            total_norm = 0
+            for p in model.parameters():
+                param_norm = p.grad.data.norm(2)
+                total_norm += param_norm.item() ** 2
+            total_norm = total_norm ** (1. / 2)
+            self.policy_grad_norm.update(total_norm)
+
+    def update_dynamics(self, b, T, policy):
+        with torch.no_grad():
+            if len(b.index) < 5000:
+                index = b.index
+            else:
+                index = random.sample(b.index, 5000)
+            non_terminals = []
+            for t, i in index:
+                if not b.trajectories[t][i].done:
+                    non_terminals.append((t, i))
+            s = np.stack([b.trajectories[t][i].state for t, i in non_terminals])
+            a = np.stack([b.trajectories[t][i].action for t, i in non_terminals])
+            s = torch.from_numpy(s).to(device=args.device)
+            a = torch.from_numpy(a).to(device=args.device)
+            sa = torch.cat((s, a), dim=1)
+            next_s = np.stack([b.trajectories[t][i+1].state for t, i in non_terminals])
+            pred_next_dist, hx = T(sa.unsqueeze(0))
+            prob_next = pred_next_dist.log_prob(torch.from_numpy(next_s).to(device=args.device)).exp()
+            prob_next = prob_next.cpu().detach().numpy()
+            prob_next = prob_next.flatten()
+            self.dynamics_hist.update(prob_next, bins=100)
 
 
-def gather_experience(buff, episode, env, policy, eps=0.0, eps_policy=None, expln_noise=0.0, render=True, seed=None, delay=0.01):
+def gather_experience(buff, episode, env, policy, eps=0.0, eps_policy=None, expln_noise=0.0, render=True, seed=None,
+                      delay=0.01):
     with torch.no_grad():
         # gather new experience
         episode_reward = 0.0
@@ -272,12 +424,13 @@ def gather_experience(buff, episode, env, policy, eps=0.0, eps_policy=None, expl
         episode_reward += reward
 
         def get_action(state, reward, done):
-            if random() >= eps:
-                action = policy(env.connector.policy_prepro(state, args.device).unsqueeze(0)).rsample()
+            t_state = env.connector.policy_prepro(state, args.device).unsqueeze(0)
+            if random.random() >= eps:
+                action = policy(t_state).rsample()
                 action = Normal(action, expln_noise).sample()
                 action = action.clamp(min=-1.0, max=1.0)
             else:
-                action = eps_policy(env.connector.policy_prepro(state, args.device).unsqueeze(0)).rsample()
+                action = eps_policy(t_state).rsample()
             action = env.connector.action_prepro(action)
             buff.append(episode,
                         env.connector.buffer_prepro(state),
@@ -296,6 +449,7 @@ def gather_experience(buff, episode, env, policy, eps=0.0, eps_policy=None, expl
             state, reward, done, info = env.step(action)
             episode_reward += reward
             action = get_action(state, reward, done)
+
     return buff, episode_reward
 
 
@@ -323,20 +477,41 @@ def log_prob_loss(trajectories, predicted_state):
     log_p = predicted_state.log_prob(trajectories.next_state.to(args.device)).mean()
     return div * 1.0 - log_p
 
+
 def make_env():
     # environment
     env = gym.make(args.env)
-    env = wm2.env.wrappers.ConcatPrev(env)
+    #env = wm2.env.wrappers.ConcatPrev(env)
     env.render()
 
     # def normalize_reward(reward):
     #     return reward / 100.0
-    #
-    # env = gym.wrappers.TransformReward(env, normalize_reward)
 
-    env.connector = PyBulletConnector(env.action_space.shape[0])
-    #env.connector = LunarLanderConnector
+    # def increase_negative(reward):
+    #     if reward < -0.5:
+    #         return - 4 * (reward - 0.5) ** 2
+    #     else:
+    #         return reward
+
+    # def boost(reward):
+    #     return reward * 1000.0
+    #
+    # env = gym.wrappers.TransformReward(env, boost)
+
+    connector = eval(args.connector)
+    env.connector = connector(env.action_space.shape[0])
+    # env.connector = LunarLanderConnector
     return env
+
+
+def determinism(seed):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
 
 def main(args):
     # curses
@@ -346,11 +521,12 @@ def main(args):
     recent_reward = deque(maxlen=20)
     wandb.gym.monitor()
     imagine_log_cooldown = wm2.utils.Cooldown(secs=30)
-    transition_log_cooldown = wm2.utils.Cooldown(secs=30)
+    viz_cooldown = wm2.utils.Cooldown(secs=120)
     render_cooldown = wm2.utils.Cooldown(secs=30)
+    episode_refresh = wm2.utils.Cooldown(secs=30)
 
     # viz
-    viz = LunarLanderViz()
+    viz = Viz()
 
     env = make_env()
 
@@ -362,17 +538,18 @@ def main(args):
     train_buff = gather_seed_episodes(env, args.seed_episodes)
     test_buff = gather_seed_episodes(env, args.seed_episodes)
     train_episode, test_episode = args.seed_episodes, args.seed_episodes
+    dummy_buffer = DummyBuffer()
 
     eps = 0.05
 
     # policy model
     policy = Policy(layers=[args.state_dims, *args.policy_hidden_dims, args.action_dims], min=args.action_min,
-                    max=args.action_max).to(args.device)
+                    max=args.action_max, nonlin=args.policy_nonlin).to(args.device)
     policy_optim = Adam(policy.parameters(), lr=args.policy_lr)
 
     # value model
     # value = nn.Linear(state_dims, 1)
-    value = MLP([args.state_dims, *args.value_hidden_dims, 1], nonlin=args.nonlin).to(args.device)
+    value = MLP([args.state_dims, *args.value_hidden_dims, 1], nonlin=args.value_nonlin).to(args.device)
     value_optim = Adam(value.parameters(), lr=args.value_lr)
 
     # transition model
@@ -381,25 +558,25 @@ def main(args):
     #                     hidden_dim=args.transition_hidden_dim, output_dim=args.state_dims,
     #                     layers=args.transition_layers).to(args.device)
     T = StochasticTransitionModel(input_dim=args.state_dims + args.action_dims,
-                        hidden_dim=args.transition_hidden_dim, output_dim=args.state_dims,
-                        layers=args.transition_layers).to(args.device)
+                                  hidden_dim=args.dynamics_hidden_dim, output_dim=args.state_dims,
+                                  layers=args.dynamics_layers).to(args.device)
     # T = GRU(input_dim=args.state_dims + args.action_dims,
     #                     hidden_dim=args.transition_hidden_dim, output_dim=args.state_dims,
     #                     layers=args.transition_layers).to(args.device)
 
-    T_optim = Adam(T.parameters(), lr=args.model_lr)
+    T_optim = Adam(T.parameters(), lr=args.dynamics_lr)
     t_criterion = log_prob_loss
 
     # reward model
     # R = HandcraftedPrior(args.state_dims, args.reward_hidden_dims, nonlin=args.nonlin).to(args.device)
     # R = Mixture(args.state_dims, args.reward_hidden_dims, nonlin=args.nonlin).to(args.device)
-    R = MLP([args.state_dims, *args.reward_hidden_dims, 1], nonlin=args.nonlin).to(args.device)
+    R = MLP([args.state_dims, *args.reward_hidden_dims, 1], nonlin=args.reward_nonlin).to(args.device)
     # R = nn.Linear(state_dims, 1)
-    R_optim = Adam(R.parameters(), lr=args.lr)
+    R_optim = Adam(R.parameters(), lr=args.reward_lr)
 
     """ probability of continuing """
-    pcont = MLP([args.state_dims, args.state_dims, args.state_dims, 1]).to(args.device)
-    pcont_optim = Adam(pcont.parameters(), lr=args.lr)
+    pcont = MLP([args.state_dims, *args.pcont_hidden_dims, 1]).to(args.device)
+    pcont_optim = Adam(pcont.parameters(), lr=args.pcont_lr)
 
     "save and restore helpers"
     R_saver = wm2.utils.SaveLoad('reward')
@@ -410,7 +587,7 @@ def main(args):
 
     converged = False
     scr.clear()
-    viz.plot_rewards_histogram(train_buff, R)
+    best_ave_reward = 0
 
     while not converged:
 
@@ -421,16 +598,17 @@ def main(args):
 
             scr.update_progressbar(c)
             scr.update_slot('wandb', f'{wandb.run.name} {wandb.run.project} {wandb.run.id}')
-            scr.update_slot('buffer_stats', f'train_buff size {len(sample_train_buff)} rejects {sample_train_buff.rejects}')
+            scr.update_slot('buffer_stats',
+                            f'train_buff size {len(sample_train_buff)} rejects {sample_train_buff.rejects}')
 
             def train_dynamics():
                 # Dynamics learning
-                train, test = SARNextDataset(sample_train_buff, mask_f=None), SARNextDataset(sample_test_buff, mask_f=None)
+                train, test = SARNextDataset(sample_train_buff, mask_f=None), SARNextDataset(sample_test_buff,
+                                                                                             mask_f=None)
                 train = DataLoader(train, batch_size=args.batch_size, collate_fn=pad_collate_2, shuffle=True)
                 test = DataLoader(test, batch_size=args.batch_size, collate_fn=pad_collate_2, shuffle=True)
 
-
-                #T.dropout_on()
+                # T.dropout_on()
 
                 # train transition model
                 for trajectories in train:
@@ -445,7 +623,7 @@ def main(args):
                     wandb.log({'transition_train': loss.item()})
                     T_saver.checkpoint(T, T_optim)
 
-                #T.dropout_off()
+                # T.dropout_off()
 
                 for trajectories in test:
                     input = torch.cat((trajectories.state, trajectories.action), dim=2).to(args.device)
@@ -453,47 +631,8 @@ def main(args):
                     loss = t_criterion(trajectories, predicted_state)
                     scr.update_slot('transition_test', f'Transition test loss  {loss.item()}')
                     wandb.log({'transition_test': loss.item()})
-                    T_saver.save_if_best(loss, T)
-                    # if transition_log_cooldown():
-                    #     scr.update_table(trajectories.next_state[10:20, 0, :].detach().cpu().numpy().T, h=10,
-                    #                      title='next_state')
-                    #     scr.update_table(predicted_state[10:20, 0, :].detach().cpu().numpy().T, h=14,
-                    #                      title='predicted')
-                    #     scr.update_table(trajectories.action[10:20, 0, :].detach().cpu().numpy().T, h=16,
-                    #                      title='action')
 
-                def weights(b, log=False):
-                    count = {'0.2': 0, '-1': 0, 'other': 0}
-                    total = 0
-
-                    for traj, t in b.index:
-                        step = b.trajectories[traj][t]
-                        total += 1
-                        if step.reward > 0.20:
-                            count['0.2'] += 1
-                        elif step.reward <= -1.0:
-                            count['-1'] += 1
-                        else:
-                            count['other'] += 1
-
-                    probs = {}
-                    for k, c in count.items():
-                        if log:
-                            scr.update_slot(f'{k}', f'{k} : {c}')
-                        probs[k] = 1 / (3 * (c + eps))
-
-                    wghts = []
-
-                    for traj, t in b.index:
-                        step = b.trajectories[traj][t]
-                        if step.reward > 0.20:
-                            wghts.append(probs['0.2'])
-                        elif step.reward <= -1.0:
-                            wghts.append(probs['-1'])
-                        else:
-                            wghts.append(probs['other'])
-
-                    return wghts
+            def train_reward():
 
                 # train_weights, test_weights = weights(sample_train_buff, log=True), weights(sample_test_buff)
                 # train_sampler = WeightedRandomSampler(train_weights, len(train_weights), replacement=True)
@@ -501,18 +640,14 @@ def main(args):
                 # train = DataLoader(train, batch_size=40*50, sampler=train_sampler)
                 # test = DataLoader(test, batch_size=40*50, sampler=test_sampler)
 
-
-            def train_reward():
                 train, test = SimpleRewardDataset(sample_train_buff), SimpleRewardDataset(sample_test_buff)
-                train = DataLoader(train, batch_size=args.batch_size*50, shuffle=True)
-                test = DataLoader(test, batch_size=args.batch_size*50, shuffle=True)
+                train = DataLoader(train, batch_size=args.batch_size * 50, shuffle=True)
+                test = DataLoader(test, batch_size=args.batch_size * 50, shuffle=True)
 
                 R.train()
 
                 for state, reward in train:
                     R_optim.zero_grad()
-                    # dist = R(state.to(args.device))
-                    # loss = - dist.log_prob(reward.to(args.device)).mean()
                     predicted_reward = R(state.to(args.device))
                     loss = ((reward.to(args.device) - predicted_reward) ** 2).mean()
                     loss.backward()
@@ -524,37 +659,10 @@ def main(args):
                 R.eval()
 
                 for state, reward in test:
-                    # dist = R(state.to(args.device))
-                    # loss = - dist.log_prob(reward.to(args.device)).mean()
                     predicted_reward = R(state.to(args.device))
                     loss = ((reward.to(args.device) - predicted_reward) ** 2).mean()
                     scr.update_slot('reward_test', f'Reward test loss  {loss.item()}')
                     wandb.log({'reward_test': loss.item()})
-                    R_saver.save_if_best(loss, R)
-
-            # Reward learning
-            # train, test = SARDataset(train_buff, mask_f=env.connector.reward_mask_f), \
-            #               SARDataset(test_buff, mask_f=env.connector.reward_mask_f)
-            # #train, test = SARDataset(train_buff), SARDataset(test_buff)
-            # train = DataLoader(train, batch_size=args.batch_size, collate_fn=pad_collate_2, shuffle=True)
-            # test = DataLoader(test, batch_size=args.batch_size, collate_fn=pad_collate_2, shuffle=True)
-            # for trajectories in train:
-            #     mask, pad = trajectories.mask.to(args.device), trajectories.pad.to(args.device)
-            #     R_optim.zero_grad()
-            #     predicted_reward = R(trajectories.state.to(args.device))
-            #     loss = (((trajectories.reward.to(args.device) - predicted_reward) * mask * pad) ** 2).mean()
-            #     loss.backward()
-            #     R_optim.step()
-            #     scr.update_slot('reward_train', f'Reward train loss {loss.item()}')
-            #     wandb.log({'reward_train': loss.item()})
-            #
-            # for trajectories in test:
-            #     predicted_reward = R(trajectories.state.to(args.device))
-            #     mask, pad = trajectories.mask.to(args.device), trajectories.pad.to(args.device)
-            #     loss = (((trajectories.reward.to(args.device) - predicted_reward) * mask * pad) ** 2).mean()
-            #     scr.update_slot('reward_test', f'Reward test loss  {loss.item()}')
-            #     wandb.log({'reward_test': loss.item()})
-
 
             def train_pcont():
                 """ probability of continuing """
@@ -562,6 +670,7 @@ def main(args):
                 train = DataLoader(train, batch_size=args.batch_size, collate_fn=pad_collate_2, shuffle=True)
                 test = DataLoader(test, batch_size=args.batch_size, collate_fn=pad_collate_2, shuffle=True)
 
+                pcont.train()
                 for trajectories in train:
                     pcont_optim.zero_grad()
                     predicted_pcont = pcont(trajectories.state.to(args.device))
@@ -570,167 +679,187 @@ def main(args):
                     pcont_optim.step()
                     scr.update_slot('pcont_train', f'pcont train loss  {loss.item()}')
 
+                pcont.eval()
                 for trajectories in test:
                     predicted_pcont = pcont(trajectories.state.to(args.device))
                     loss = ((predicted_pcont - trajectories.pcont.to(args.device)) ** 2).mean()
                     scr.update_slot('pcont_test', f'pcont test loss  {loss.item()}')
 
 
-            train_pcont()
+
+            def train_behavior():
+                # Behaviour learning
+                train = ConcatDataset([SARDataset(sample_train_buff)])
+                train = DataLoader(train, batch_size=args.batch_size * 40, collate_fn=pad_collate_2, shuffle=True)
+
+                for trajectory in train:
+                    imagine = [torch.cat((trajectory.state, trajectory.action), dim=2).to(args.device)]
+                    reward = [R(trajectory.state.to(args.device))]
+                    p_of_continuing = [pcont(trajectory.state.to(args.device))]
+                    v = [value(trajectory.state.to(args.device))]
+
+                    # imagine forward here
+                    for tau in range(args.horizon):
+                        state, h = T(imagine[tau])
+                        if isinstance(state, torch.distributions.Distribution):
+                            state = state.rsample()
+                        action = policy(state).rsample()
+                        reward += [R(state)]
+                        p_of_continuing += [pcont(state)]
+                        v += [value(state)]
+                        imagine += [torch.cat((state, action), dim=2)]
+
+                    # VR = torch.mean(torch.stack(reward), dim=0)
+                    rstack, vstack, pcontstack = torch.stack(reward), torch.stack(v), torch.stack(p_of_continuing)
+                    vstack = vstack * pcontstack
+                    H, L, N, S = rstack.shape
+
+                    """ construct matrix in form
+                    
+                    R0 V1  0  0
+                    R0 R1 V2  0
+                    R0 R1 R2 V3
+                    
+                    Where R0, R1, R2 are predicted rewards at timesteps 0, 1, 2
+                    and V1, V2, V3 are the predicted future values of states at time 1, 2, 3
+                    """
+
+                    # create a H * H matrix filled with rewards (using rstack preserves computation graph)
+                    rstack = rstack.repeat(H, 1, 1, 1).reshape(H, H, L, N, S)
+
+                    # replace the upper triangle with zeros
+                    r, c = torch.triu_indices(H, H)
+                    rstack[r, c] = 0.0
+
+                    # replace diagonal rewards with values
+                    rstack[torch.arange(H), torch.arange(H)] = vstack[torch.arange(H)]
+
+                    # clip the top row
+                    rstack = rstack[1:, :]
+
+                    # occasionally dump table to screen for analysis
+                    if imagine_log_cooldown():
+                        rewards = rstack[-1:, :, 0, 0, 0].detach().cpu().numpy()
+                        scr.update_table(rewards, title='imagined rewards and values')
+                        v = vstack[:, 0, 0, 0].unsqueeze(0).detach().cpu().numpy()
+                        scr.update_table(v, h=2)
+                        imagined_trajectory = torch.stack(imagine)[:, 0, 0, :].detach().cpu().numpy().T
+                        scr.update_table(imagined_trajectory, h=3, title='imagined trajectory')
+
+                    """ reduce the above matrix to values using the formula from the paper in 2 steps
+                    first, compute VN for each k by applying discounts to each time-step and compute the expected value
+                    """
+
+                    # compute and apply the discount (alternatively can estimate the discount using a probability to terminate function)
+                    n = torch.linspace(0.0, H - 1, H, device=args.device)
+                    discount = torch.full_like(n, args.discount, device=args.device).pow(n).view(1, -1, 1, 1, 1)
+                    rstack = rstack * discount
+
+                    # compute the expectation
+                    steps = torch.linspace(2, H, H - 1, device=args.device).view(-1, 1, 1, 1)
+                    VNK = rstack.sum(dim=1) / steps
+
+                    """ now we are left with a single column matrix in form
+                    VN(k=1)
+                    VN(k=2)
+                    VN(k=3)
+                    
+                    combine these into a single value with the V lambda equation
+                    
+                    VL = (1-lambda) * lambda ^ 0  * VN(k=1) + (1 - lambda) * lambda ^ 1 VN(k=2) + lambda ^ 2 * VN(k=3)
+                    
+                    Note the lambda terms should sum to 1, or you're doing it wrong
+                    """
+
+                    lam = torch.full((VNK.size(0),), args.lam, device=args.device).pow(
+                        torch.arange(VNK.size(0), device=args.device)).view(-1, 1, 1, 1)
+                    lam[0:-1] = lam[0:-1] * (1 - args.lam)
+                    VL = (VNK * lam).sum(0)
+
+                    "backprop loss"
+                    policy_optim.zero_grad(), value_optim.zero_grad()
+                    T_optim.zero_grad(), R_optim.zero_grad(),  pcont_optim.zero_grad()
+                    policy_loss = -VL.mean()
+                    policy_loss.backward()
+                    clip_grad_norm_(parameters=policy.parameters(), max_norm=100.0)
+                    viz.sample_grad_norm(policy)
+                    policy_optim.step()
+
+                    "housekeeping"
+                    scr.update_slot('policy_loss', f'Policy loss  {policy_loss.item()}')
+                    wandb.log({'policy_loss': policy_loss.item()})
+                    policy_saver.checkpoint(policy, policy_optim)
+
+                    " regress value against tau ie: the initial estimated value... "
+                    policy_optim.zero_grad(), value_optim.zero_grad()
+                    T_optim.zero_grad(), R_optim.zero_grad(), pcont_optim.zero_grad()
+                    VN = VL.detach().reshape(L * N, -1)
+                    values = value(trajectory.state.reshape(L * N, -1).to(args.device))
+                    value_loss = ((VN - values) ** 2).mean() / 2
+                    value_loss.backward()
+                    clip_grad_norm_(parameters=value.parameters(), max_norm=100.0)
+                    value_optim.step()
+
+                    "housekeeping"
+                    scr.update_slot('value_loss', f'Value loss  {value_loss.item()}')
+                    wandb.log({'value_loss': value_loss.item()})
+                    value_saver.checkpoint(value, value_optim)
+                    if value_saver.is_best(value_loss):
+                        value_saver.save(value, 'best')
+
             train_dynamics()
             train_reward()
-
-            # Behaviour learning
-            train = ConcatDataset([SARDataset(sample_train_buff)])
-            train = DataLoader(train, batch_size=args.batch_size * 40, collate_fn=pad_collate_2, shuffle=True)
-
-            for trajectory in train:
-                imagine = [torch.cat((trajectory.state, trajectory.action), dim=2).to(args.device)]
-                reward = [R(trajectory.state.to(args.device))]
-                p_of_continuing = [pcont(trajectory.state.to(args.device))]
-                v = [value(trajectory.state.to(args.device))]
-
-                # imagine forward here
-                for tau in range(args.horizon):
-                    state, h = T(imagine[tau])
-                    if isinstance(state, torch.distributions.Distribution):
-                        state = state.rsample()
-                    action = policy(state).rsample()
-                    reward += [R(state)]
-                    p_of_continuing += [pcont(state)]
-                    v += [value(state)]
-                    imagine += [torch.cat((state, action), dim=2)]
-
-                # VR = torch.mean(torch.stack(reward), dim=0)
-                rstack, vstack, pcontstack = torch.stack(reward), torch.stack(v), torch.stack(p_of_continuing)
-                rstack = rstack * pcontstack
-                H, L, N, S = rstack.shape
-
-                """ construct matrix in form
-                
-                R0 V1  0  0
-                R0 R1 V2  0
-                R0 R1 R2 V3
-                
-                Where R0, R1, R2 are predicted rewards at timesteps 0, 1, 2
-                and V1, V2, V3 are the predicted future values of states at time 1, 2, 3
-                """
-
-                # create a H * H matrix filled with rewards (using rstack preserves computation graph)
-                rstack = rstack.repeat(H, 1, 1, 1).reshape(H, H, L, N, S)
-
-                # replace the upper triangle with zeros
-                r, c = torch.triu_indices(H, H)
-                rstack[r, c] = 0.0
-
-                # replace diagonal rewards with values
-                rstack[torch.arange(H), torch.arange(H)] = vstack[torch.arange(H)]
-
-                # clip the top row
-                rstack = rstack[1:, :]
-
-                # occasionally dump table to screen for analysis
-                if imagine_log_cooldown():
-                    rewards = rstack[-1:, :, 0, 0, 0].detach().cpu().numpy()
-                    scr.update_table(rewards, title='imagined rewards and values')
-                    v = vstack[:, 0, 0, 0].unsqueeze(0).detach().cpu().numpy()
-                    scr.update_table(v, h=2)
-                    imagined_trajectory = torch.stack(imagine)[:, 0, 0, :].detach().cpu().numpy().T
-                    scr.update_table(imagined_trajectory, h=3, title='imagined trajectory')
-
-                """ reduce the above matrix to values using the formula from the paper in 2 steps
-                first, compute VN for each k by applying discounts to each time-step and compute the expected value
-                """
-
-                # compute and apply the discount (alternatively can estimate the discount using a probability to terminate function)
-                n = torch.linspace(0.0, H - 1, H, device=args.device)
-                discount = torch.full_like(n, args.discount, device=args.device).pow(n).view(1, -1, 1, 1, 1)
-                rstack = rstack * discount
-
-                # compute the expectation
-                steps = torch.linspace(2, H, H - 1, device=args.device).view(-1, 1, 1, 1)
-                VNK = rstack.sum(dim=1) / steps
-
-                """ now we are left with a single column matrix in form
-                VN(k=1)
-                VN(k=2)
-                VN(k=3)
-                
-                combine these into a single value with the V lambda equation
-                
-                VL = (1-lambda) * lambda ^ 0  * VN(k=1) + (1 - lambda) * lambda ^ 1 VN(k=2) + lambda ^ 2 * VN(k=3)
-                
-                Note the lambda terms should sum to 1, or you're doing it wrong
-                """
-
-                lam = torch.full((VNK.size(0),), args.lam, device=args.device).pow(
-                    torch.arange(VNK.size(0), device=args.device)).view(-1, 1, 1, 1)
-                lam[0:-1] = lam[0:-1] * (1 - args.lam)
-                VL = (VNK * lam).sum(0)
-
-                "backprop loss"
-                policy_optim.zero_grad(), value_optim.zero_grad()
-                T_optim.zero_grad(), R_optim.zero_grad()  # , D_optim.zero_grad()
-                policy_loss = -VL.mean()
-                policy_loss.backward()
-                clip_grad_norm_(parameters=policy.parameters(), max_norm=100.0)
-                policy_optim.step()
-
-                "housekeeping"
-                scr.update_slot('policy_loss', f'Policy loss  {policy_loss.item()}')
-                wandb.log({'policy_loss': policy_loss.item()})
-                policy_saver.checkpoint(policy, policy_optim)
-
-                " regress value against tau ie: the initial estimated value... "
-                policy_optim.zero_grad(), value_optim.zero_grad()
-                T_optim.zero_grad(), R_optim.zero_grad()  # , D_optim.zero_grad()
-                VN = VL.detach().reshape(L * N, -1)
-                values = value(trajectory.state.reshape(L * N, -1).to(args.device))
-                value_loss = ((VN - values) ** 2).mean() / 2
-                value_loss.backward()
-                clip_grad_norm_(parameters=value.parameters(), max_norm=100.0)
-                value_optim.step()
-
-                "housekeeping"
-                scr.update_slot('value_loss', f'Value loss  {value_loss.item()}')
-                wandb.log({'value_loss': value_loss.item()})
-                value_saver.checkpoint(value, value_optim)
-                value_saver.save_if_best(value_loss, value)
-
+            train_pcont()
+            train_behavior()
 
         "run the policy on the environment and collect experience"
-        sampled_rewards = []
-        for _ in range(1):
-            train_buff, reward = gather_experience(train_buff, train_episode, env, policy,
-                                                   eps=0.0, eps_policy=env.connector.random_policy,
-                                                   render=render_cooldown(), expln_noise=args.exploration_noise)
-            wandb.log({'reward': reward})
-            sampled_rewards.append(reward)
-            viz.update_rewards(reward)
-            train_episode += 1
+        train_buff, reward = gather_experience(train_buff, train_episode, env, policy,
+                                               eps=0.0, eps_policy=env.connector.random_policy, seed=args.seed,
+                                               render=render_cooldown(), expln_noise=args.exploration_noise)
+        if episode_refresh():
+            viz.update_trajectory_plots(value, R, pcont, T, train_buff, train_episode)
 
-            recent_reward.append(reward)
-            scr.update_slot('eps', f'EPS: {eps}')
-            rr = ''
-            for reward in recent_reward:
-                rr += f' {reward:.5f},'
-            scr.update_slot('recent_rewards', 'Recent rewards: ' + rr)
+        train_episode += 1
 
-        policy_saver.save_if_best(mean(sampled_rewards), policy, mode='highest')
+        wandb.log({'reward': reward})
+        viz.update_rewards(reward)
+        recent_reward.append(reward)
+        scr.update_slot('eps', f'exploration_noise: {args.exploration_noise}')
+        rr = ''
+        for reward in recent_reward:
+            rr += f' {reward:.5f},'
+        scr.update_slot('recent_rewards', 'Recent rewards: ' + rr)
+        scr.update_slot('beat_ave_reward', f'Best ave reward: {best_ave_reward}')
 
-        viz.plot_rewards_histogram(train_buff, R)
+        "check if the policy is worth saving"
+        if reward > best_ave_reward:
+            sampled_rewards = []
 
-        for _ in range(1):
-            test_buff, reward = gather_experience(test_buff, test_episode, env, policy,
-                                                  eps=0.0, eps_policy=env.connector.random_policy,
-                                                  render=False, expln_noise=args.exploration_noise)
-            test_episode += 1
+            for _ in range(20):
+                dummy_buffer, reward = gather_experience(dummy_buffer, train_episode, env, policy,
+                                                       eps=0.0, eps_policy=env.connector.random_policy,
+                                                       expln_noise=0.0, seed=args.seed)
+                sampled_rewards.append(reward)
+            if mean(sampled_rewards) > best_ave_reward:
+                best_ave_reward = mean(sampled_rewards)
+                policy_saver.save(policy, 'best', ave=mean(sampled_rewards), max=max(sampled_rewards),
+                                  explr_noise=args.exploration_noise)
+
+        test_buff, reward = gather_experience(test_buff, test_episode, env, policy,
+                                              eps=0.0, eps_policy=env.connector.random_policy,
+                                              render=False, expln_noise=args.exploration_noise, seed=args.seed)
+        test_episode += 1
+
+        if viz_cooldown():
+            viz.plot_rewards_histogram(train_buff, R)
+            viz.update_dynamics(test_buff, T, env.connector.uniform_random_policy)
+            viz.update_pcont(test_buff, pcont)
+            viz.update_value(test_buff, value)
 
         converged = False
 
 
 def demo(args):
-
     env = make_env()
     env.render()
 
@@ -748,49 +877,113 @@ def demo(args):
     wandb_run_dir = str(next(pathlib.Path().glob(f'wandb/*{args.demo}')))
 
     while True:
-        load_dict = wm2.utils.SaveLoad.best(wandb_run_dir, 'policy')
-        loss = load_dict['loss']
+        load_dict = wm2.utils.SaveLoad.load(wandb_run_dir, 'policy', 'best')
+        msg = ''
+        for arg, value in load_dict.items():
+            if arg != 'model':
+                msg += f'{arg}: {value} '
+        print(msg)
         policy.load_state_dict(load_dict['model'])
-        print(f'best_loss {loss}')
         train_buff, reward = gather_experience(dummy_buffer, 0, env, policy,
                                                eps=0.0, eps_policy=env.connector.random_policy,
-                                               render=True, delay=0.1)
+                                               render=True, delay=1.0 / args.fps)
 
 
 if __name__ == '__main__':
-    args = {'seed_episodes': 5,
-            'collect_interval': 10,
-            'batch_size': 40,
-            'device': 'cuda:0',
-            'horizon': 15,
-            'discount': 0.99,
-            'lam': 0.95,
-            'lr': 1e-4,
-            'model_lr': 1e-4,
-            'value_lr': 2e-5,
-            'policy_lr': 2e-5,
-            'policy_hidden_dims': [48, 48],
-            'value_hidden_dims': [300],
-            'reward_hidden_dims': [300, 300],
-            'nonlin': 'nn.ELU',
-            'transition_layers': 1,
-            'transition_hidden_dim': 48,
-            #'env': 'HopperPyBulletEnv-v0',
-            'env': 'HalfCheetahPyBulletEnv-v0',
-            'demo': 'off',
-            'seed': None,
-            'exploration_noise': 0.2
-            }
+
+    defaults = {
+        'env': 'HalfCheetahPyBulletEnv-v0',
+        'connector': 'wm2.env.pybullet.PyBulletConnector',
+        'seed_episodes': 5,
+        'collect_interval': 10,
+        'batch_size': 40,
+        'device': 'cuda:0',
+        'horizon': 15,
+        'discount': 0.99,
+        'lam': 0.95,
+        'exploration_noise': 0.20,
+
+        'dynamics_lr': 1e-4,
+        'dynamics_layers': 1,
+        'dynamics_hidden_dim': 48,
+
+        'pcont_lr': 1e-4,
+        'pcont_hidden_dims': [48, 48],
+        'pcont_nonlin': 'nn.ELU',
+
+        'value_lr': 2e-5,
+        'value_hidden_dims': [300],
+        'value_nonlin': 'nn.ELU',
+
+        'policy_lr': 2e-5,
+        'policy_hidden_dims': [48, 48],
+        'policy_nonlin': 'nn.ELU',
+
+        'reward_lr': 1e-4,
+        'reward_hidden_dims': [300, 300],
+        'reward_nonlin': 'nn.ELU',
+
+        'demo': 'off',
+        'seed': None,
+        'fps': 24,
+        'config': None
+    }
 
     parser = argparse.ArgumentParser()
-    for argument, value in args.items():
+    for argument, value in defaults.items():
         if argument == 'seed':
             parser.add_argument('--' + argument, type=int, required=False, default=None)
+        elif argument == 'config':
+            parser.add_argument('--' + argument, type=str, required=False, default=None)
         else:
             parser.add_argument('--' + argument, type=type(value), required=False, default=value)
     args = parser.parse_args()
 
-    # args = SimpleNamespace(**args)
+    """ 
+    required due to https://github.com/yaml/pyyaml/issues/173
+    pyyaml does not correctly parse scientific notation 
+    """
+    loader = yaml.SafeLoader
+    loader.add_implicit_resolver(
+        u'tag:yaml.org,2002:float',
+        re.compile(u'''^(?:
+         [-+]?(?:[0-9][0-9_]*)\\.[0-9_]*(?:[eE][-+]?[0-9]+)?
+        |[-+]?(?:[0-9][0-9_]*)(?:[eE][-+]?[0-9]+)
+        |\\.[0-9_]+(?:[eE][-+][0-9]+)?
+        |[-+]?[0-9][0-9_]*(?::[0-5]?[0-9])+\\.[0-9_]*
+        |[-+]?\\.(?:inf|Inf|INF)
+        |\\.(?:nan|NaN|NAN))$''', re.X),
+        list(u'-+0123456789.'))
+
+
+    def flatten(d, parent_key='', sep='_'):
+        items = []
+        for k, v in d.items():
+            new_key = parent_key + sep + k if parent_key else k
+            if isinstance(v, collections.MutableMapping):
+                items.extend(flatten(v, new_key, sep=sep).items())
+            else:
+                items.append((new_key, v))
+        return dict(items)
+
+
+    yaml_conf = {}
+    if args.config is not None:
+        with pathlib.Path(args.config).open() as f:
+            yaml_conf = yaml.load(f, Loader=yaml.FullLoader)
+            yaml_conf = flatten(yaml_conf)
+
+    """ precedence is command line, config file, default """
+    for key, value in defaults.items():
+        if key in args:
+            pass
+        elif key in yaml_conf:
+            vars(args)[key] = yaml_conf[key]
+        else:
+            vars(args)[key] = defaults[key]
+
+    if args.seed is not None:
+        determinism(args.seed)
 
     if args.demo == 'off':
         wandb.init(config=args)

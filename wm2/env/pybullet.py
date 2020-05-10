@@ -1,4 +1,5 @@
 import torch
+import torch.distributions as dist
 from distributions import ScaledTanhTransformedGaussian
 import numpy as np
 
@@ -30,6 +31,11 @@ class PyBulletConnector:
         mu = torch.zeros((1, self.action_dims,))
         scale = torch.full((1, self.action_dims,), 0.5)
         return ScaledTanhTransformedGaussian(mu, scale)
+
+
+    def uniform_random_policy(self, state):
+        mu = torch.ones((state.size(0), self.action_dims,))
+        return dist.Uniform(-mu, mu)
 
     @staticmethod
     def reward_mask_f(state, reward, action):
