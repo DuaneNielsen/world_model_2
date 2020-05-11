@@ -18,6 +18,7 @@ from torch.distributions import Normal, Categorical
 from torch.distributions.mixture_same_family import MixtureSameFamily
 from torch.distributions.kl import kl_divergence
 from torch.nn.utils import clip_grad_norm_
+import torch.nn.functional as F
 import torch.backends.cudnn
 import torch.cuda
 import numpy as np
@@ -80,6 +81,15 @@ class Mixture(nn.Module):
         comp = Normal(mu, sigma)
         gmm = MixtureSameFamily(mix, comp)
         return gmm
+
+
+class SoftplusMLP(nn.Module):
+    def __init__(self, layers, nonlin=None):
+        super().__init__()
+        self.mlp = MLP(layers, nonlin)
+
+    def forward(self, input):
+        return F.softplus(self.mlp(input))
 
 
 class Policy(nn.Module):
@@ -483,6 +493,8 @@ def make_env():
     # environment
     env = gym.make(args.env)
     #env = wm2.env.wrappers.ConcatPrev(env)
+    env = wm2.env.wrappers.AddDoneToState(env)
+    env = wm2.env.wrappers.RewardOneIfNotDone(env)
     env.render()
 
     # def normalize_reward(reward):
@@ -497,7 +509,9 @@ def make_env():
     # def boost(reward):
     #     return reward * 1000.0
     #
-    # env = gym.wrappers.TransformReward(env, boost)
+
+
+    #env = gym.wrappers.TransformReward(env, alwaysone)
 
     connector = eval(args.connector)
     env.connector = connector(env.action_space.shape[0])
@@ -571,12 +585,24 @@ def main(args):
     # reward model
     # R = HandcraftedPrior(args.state_dims, args.reward_hidden_dims, nonlin=args.nonlin).to(args.device)
     # R = Mixture(args.state_dims, args.reward_hidden_dims, nonlin=args.nonlin).to(args.device)
-    R = MLP([args.state_dims, *args.reward_hidden_dims, 1], nonlin=args.reward_nonlin).to(args.device)
+    # R = MLP([args.state_dims, *args.reward_hidden_dims, 1], nonlin=args.reward_nonlin).to(args.device)
     # R = nn.Linear(state_dims, 1)
-    R_optim = Adam(R.parameters(), lr=args.reward_lr)
+    # R_optim = Adam(R.parameters(), lr=args.reward_lr)
+    class DiffReward(nn.Module):
+        def __init__(self):
+            super().__init__()
+            pass
+
+        def forward(self, state):
+            state = torch.transpose(state, 0, -1)
+            reward = (1.0 - state[-1]).unsqueeze(0)
+            reward = torch.transpose(reward, 0, -1)
+            return reward
+
+    R = DiffReward()
 
     """ probability of continuing """
-    pcont = MLP([args.state_dims, *args.pcont_hidden_dims, 1]).to(args.device)
+    pcont = SoftplusMLP([args.state_dims, *args.pcont_hidden_dims, 1]).to(args.device)
     pcont_optim = Adam(pcont.parameters(), lr=args.pcont_lr)
 
     "save and restore helpers"
@@ -645,19 +671,19 @@ def main(args):
                 train = DataLoader(train, batch_size=args.batch_size * 50, shuffle=True)
                 test = DataLoader(test, batch_size=args.batch_size * 50, shuffle=True)
 
-                R.train()
-
-                for state, reward in train:
-                    R_optim.zero_grad()
-                    predicted_reward = R(state.to(args.device))
-                    loss = ((reward.to(args.device) - predicted_reward) ** 2).mean()
-                    loss.backward()
-                    R_optim.step()
-                    scr.update_slot('reward_train', f'Reward train loss {loss.item()}')
-                    wandb.log({'reward_train': loss.item()})
-                    R_saver.checkpoint(R, R_optim)
-
-                R.eval()
+                # R.train()
+                #
+                # for state, reward in train:
+                #     R_optim.zero_grad()
+                #     predicted_reward = R(state.to(args.device))
+                #     loss = ((reward.to(args.device) - predicted_reward) ** 2).mean()
+                #     loss.backward()
+                #     R_optim.step()
+                #     scr.update_slot('reward_train', f'Reward train loss {loss.item()}')
+                #     wandb.log({'reward_train': loss.item()})
+                #     R_saver.checkpoint(R, R_optim)
+                #
+                # R.eval()
 
                 for state, reward in test:
                     predicted_reward = R(state.to(args.device))
@@ -779,7 +805,7 @@ def main(args):
 
                     "backprop loss"
                     policy_optim.zero_grad(), value_optim.zero_grad()
-                    T_optim.zero_grad(), R_optim.zero_grad(),  pcont_optim.zero_grad()
+                    T_optim.zero_grad(),  pcont_optim.zero_grad(), #R_optim.zero_grad(),
                     policy_loss = -VL.mean()
                     policy_loss.backward()
                     clip_grad_norm_(parameters=policy.parameters(), max_norm=100.0)
@@ -793,7 +819,7 @@ def main(args):
 
                     " regress value against tau ie: the initial estimated value... "
                     policy_optim.zero_grad(), value_optim.zero_grad()
-                    T_optim.zero_grad(), R_optim.zero_grad(), pcont_optim.zero_grad()
+                    T_optim.zero_grad(),  pcont_optim.zero_grad(), #R_optim.zero_grad(),
                     VN = VL.detach().reshape(L * N, -1)
                     values = value(trajectory.state.reshape(L * N, -1).to(args.device))
                     value_loss = ((VN - values) ** 2).mean() / 2

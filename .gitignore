@@ -2,3 +2,4 @@
 /configs/
 /data/
 /.run_id
+/wandb/

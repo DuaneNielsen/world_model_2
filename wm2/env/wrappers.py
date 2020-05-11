@@ -257,3 +257,31 @@ class ConcatDeltaPrev(gym.Wrapper):
         state = np.concatenate((raw_state, raw_state - self.prev_obs))
         self.prev_obs = raw_state
         return state, rew, done, info
+
+
+class AddDoneToState(gym.Wrapper):
+    def __init__(self, env):
+        super().__init__(env)
+        low = np.concatenate((self.unwrapped.observation_space.low, np.zeros(1)))
+        high = np.concatenate((self.unwrapped.observation_space.high, np.ones(1)))
+        self.observation_space = spaces.Box(low=low, high=high, dtype=np.float32)
+
+    def reset(self):
+        state = self.env.reset()
+        return np.concatenate((state, np.ones(1, dtype=state.dtype)), axis=0)
+
+    def step(self, action):
+        raw_state, rew, done, info = self.env.step(action)
+        state = np.concatenate((raw_state, np.full(1, fill_value=done, dtype=raw_state.dtype)), axis=0)
+        return state, rew, done, info
+
+
+class RewardOneIfNotDone(gym.Wrapper):
+    def __init__(self, env):
+        super().__init__(env)
+
+    def step(self, action):
+        state, rew, done, info = self.env.step(action)
+        reward = 0 if done else 1.0
+        return state, reward, done, info
+
