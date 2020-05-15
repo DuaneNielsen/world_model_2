@@ -10,7 +10,7 @@ import cv2
 import numpy as np
 import torch
 
-from functional import multivariate_diag_gaussian, multivariate_gaussian
+from wm2.functional import multivariate_diag_gaussian, multivariate_gaussian
 
 
 def to_opencv_image(im):
