@@ -17,7 +17,7 @@ from torch.utils.data import DataLoader, ConcatDataset, WeightedRandomSampler
 from torch.distributions import Normal, Categorical
 from torch.distributions.mixture_same_family import MixtureSameFamily
 from torch.distributions.kl import kl_divergence
-from torch.nn.utils import clip_grad_norm_
+from torch.nn.utils import clip_grad_norm_, clip_grad_value_
 import torch.nn.functional as F
 import torch.backends.cudnn
 import torch.cuda
@@ -396,7 +396,7 @@ class Viz:
             lp = lp.squeeze().cpu().numpy()
             self.live_dynamics.update(lp)
 
-    def sample_grad_norm(self, model, sample=0.05):
+    def sample_grad_norm(self, model, sample=0.01):
         if random.random() < sample:
             total_norm = 0
             for p in model.parameters():
@@ -545,9 +545,9 @@ def main(args):
     recent_reward = deque(maxlen=20)
     wandb.gym.monitor()
     imagine_log_cooldown = wm2.utils.Cooldown(secs=30)
-    viz_cooldown = wm2.utils.Cooldown(secs=120)
-    render_cooldown = wm2.utils.Cooldown(secs=30)
-    episode_refresh = wm2.utils.Cooldown(secs=30)
+    viz_cooldown = wm2.utils.Cooldown(secs=240)
+    render_cooldown = wm2.utils.Cooldown(secs=120)
+    episode_refresh = wm2.utils.Cooldown(secs=120)
 
     # viz
     viz = Viz(window_title=f'{wandb.run.project} {wandb.run.id}')
@@ -841,11 +841,11 @@ def main(args):
                     #T_optim.zero_grad(),  pcont_optim.zero_grad(), #R_optim.zero_grad(),
                     policy_loss = -VL.mean()
                     policy_loss.backward()
-                    clip_grad_norm_(parameters=policy.parameters(), max_norm=100.0)
+                    clip_grad_value_(policy.parameters(), 0.001)
                     policy_optim.step()
 
                     "housekeeping"
-                    viz.sample_grad_norm(policy)
+                    viz.sample_grad_norm(policy, sample=0.05)
                     scr.update_slot('policy_loss', f'Policy loss  {policy_loss.item()}')
                     wandb.log({'policy_loss': policy_loss.item()})
                     policy_saver.checkpoint(policy, policy_optim)

@@ -1,0 +1,35 @@
+env: 'HalfCheetahPyBulletEnv-v0'
+connector: 'wm2.env.pybullet.PyBulletConnector'
+seed_episodes: 5
+collect_interval: 10
+batch_size: 40
+horizon: 15
+discount: 0.99
+lam: 0.95
+exploration_noise: 0.25
+
+dynamics:
+  lr: 1e-3
+  layers: 1
+  hidden_dim: 48
+
+value:
+  lr: 1e-3
+  hidden_dims: [300, 300]
+  nonlin: 'nn.ELU'
+
+policy:
+  lr: 2e-4
+  hidden_dims: [48, 48]
+  nonlin: 'nn.ELU'
+
+reward:
+  lr: 1e-3
+  hidden_dims: [300, 300]
+  nonlin: 'nn.ELU'
+
+pcont:
+  lr: 1e-3
+  hidden_dims: [300, 300]
+  nonlin: 'nn.ELU'
+

@@ -117,13 +117,20 @@ class SubsetSequenceBuffer:
         while len(self.trajectories) < num_trajectories:
             for i in rnd.choice(len(b), 1):
                 trajectory = b.trajectories[i]
+                padding = length - len(trajectory)
+                if padding > 0:
+                    pad = SARI(np.zeros_like(trajectory[0].state),
+                               np.zeros_like(trajectory[0].action),
+                               np.zeros_like(trajectory[0].reward), True, None)
+                    trajectory = padding*[pad] + trajectory
                 available = len(trajectory) - length + 1
-                if available < 1:
-                    self.rejects += 1
-                    continue
-                else:
-                    start = rnd.randint(0, available)
-                    self.trajectories.append(b.trajectories[i][start:start+length])
+                start = rnd.randint(0, available)
+                self.trajectories.append(b.trajectories[i][start:start+length])
+
+                # if available < 1:
+                #     self.rejects += 1
+                #     continue
+                # else:
 
         self.index = []
         for i, t in enumerate(self.trajectories):
