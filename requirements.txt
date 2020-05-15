@@ -5,4 +5,5 @@ wandb
 matplotlib
 pybullet
 opencv-python
+tqdm
 git+https://github.com/benelot/pybullet-gym
