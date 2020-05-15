@@ -2,6 +2,8 @@ import torch
 import torch.distributions as dist
 from distributions import ScaledTanhTransformedGaussian
 import numpy as np
+import gym
+import math
 
 
 class PyBulletConnector:
@@ -51,3 +53,33 @@ class PyBulletConnector:
         i = np.random.choice(r.shape[0], less_than_0_3.sum(), p=p)
         less_than_0_3[i] = True
         return less_than_0_3[:, np.newaxis]
+
+
+class PybulletWalkerWrapper(gym.Wrapper):
+    def __init__(self, env):
+        super().__init__(env)
+        low = np.concatenate((self.unwrapped.observation_space.low, np.array([-np.inf, 0])))
+        high = np.concatenate((self.unwrapped.observation_space.high, np.array([+np.inf, 1])))
+        self.observation_space = gym.spaces.Box(low=low, high=high, dtype=np.float32)
+        self.robot = env.unwrapped.robot
+
+    def reset(self):
+        state = self.env.reset()
+        target_dist = np.array([self.robot.walk_target_dist], dtype=state.dtype) / 1000.0
+        done_flag = np.full(1, fill_value=0, dtype=state.dtype)
+        return np.concatenate((state, target_dist, done_flag), axis=0)
+
+    def step(self, action):
+        raw_state, rew, done, info = self.env.step(action)
+        target_dist = np.array([self.robot.walk_target_dist], dtype=raw_state.dtype) / 1000.0
+        done_flag = np.full(1, fill_value=done, dtype=raw_state.dtype)
+        state = np.concatenate((raw_state, target_dist, done_flag), axis=0)
+        # if done:
+        #     rew = 0.0
+        # else:
+            #rew = 1.0 + 0.95 ** (self.robot.walk_target_dist / 20.0)
+        #rew = (1.5 - np.log(1.5 - target_dist)) * (1-done_flag)
+        # rew = 20/(1+np.exp((target_dist - 0.7)*10)) * (1.0-done_flag)
+        rew = 10 * (1.0 - target_dist) + 0.5
+        rew = rew * (1.0 - done_flag)
+        return state, rew.item(), done, info

@@ -42,7 +42,7 @@ from wm2.env.pybullet import PyBulletConnector
 
 
 class MLP(nn.Module):
-    def __init__(self, layers, nonlin=None):
+    def __init__(self, layers, nonlin=None, dropout=0.2):
         super().__init__()
         in_dims = layers[0]
         net = []
@@ -50,11 +50,11 @@ class MLP(nn.Module):
         nonlin = nn.ELU if nonlin is None else eval(nonlin)
         for hidden in layers[1:-1]:
             net += [nn.Linear(in_dims, hidden)]
-            net += [nn.Dropout(0.5)]
+            net += [nn.Dropout(dropout)]
             net += [nonlin()]
             in_dims = hidden
         net += [nn.Linear(in_dims, layers[-1], bias=False)]
-        net += [nn.Dropout(0.2)]
+        net += [nn.Dropout(dropout)]
 
         self.mlp = nn.Sequential(*net)
 
@@ -95,7 +95,7 @@ class SoftplusMLP(nn.Module):
 class Policy(nn.Module):
     def __init__(self, layers, min=-1.0, max=1.0, nonlin=None):
         super().__init__()
-        self.mu = MLP(layers, nonlin)
+        self.mu = MLP(layers, nonlin, dropout=0.0)
         self.scale = nn.Linear(layers[0], 1, bias=False)
         self.min = min
         self.max = max
@@ -237,9 +237,9 @@ class PlotPanel:
         self.plot = fig.add_subplot(*panels, fig_index, )
         self.plot.set_title(self.label)
 
-    def update(self, sequence):
+    def update(self, sequence, label=''):
         self.plot.set_title(self.label)
-        self.plot.plot(sequence)
+        self.plot.plot(sequence, label=label)
         self.plot.relim()
         self.plot.autoscale_view()
         self.fig.canvas.draw()
@@ -275,9 +275,11 @@ class LiveLine:
 
 
 class Viz:
-    def __init__(self):
+    def __init__(self, window_title=None):
         plt.ion()
-        self.fig = plt.figure(num=None, figsize=(18, 12), dpi=80, facecolor='w', edgecolor='k')
+        self.fig = plt.figure(num=None, figsize=(18, 12), dpi=80, facecolor='w', edgecolor='k', )
+        if window_title:
+            self.fig.canvas.set_window_title(window_title)
 
         panels = (3, 5)
         self.rew_plot = LiveLine(self.fig, panels, 1, label='episode reward')
@@ -288,23 +290,25 @@ class Viz:
         self.raw_pcont_hist = HistogramPanel(self.fig, panels, 5, label='measured pcont')
         self.est_pcont_hist = HistogramPanel(self.fig, panels, 6, label='est pcont')
         self.value_hist = HistogramPanel(self.fig, panels, 7, label='value')
+        self.sampled_value_hist = HistogramPanel(self.fig, panels, 8, label='sampled value')
 
-        self.policy_grad_norm = LiveLine(self.fig, panels, 8, label='policy gradient')
+        self.policy_grad_norm = LiveLine(self.fig, panels, 9, label='policy gradient')
 
-        self.live_value = PlotPanel(self.fig, panels, fig_index=9, label='episode value')
-        self.live_reward = PlotPanel(self.fig, panels, fig_index=12, label='episode reward')
-        self.live_pcont = PlotPanel(self.fig, panels, fig_index=10, label='pcont')
-        self.exp_rew_vs_actual = PlotPanel(self.fig, panels, fig_index=11, label='reward: exp vs actual')
-        self.live_dynamics = PlotPanel(self.fig, panels, fig_index=13, label='episode dynamics')
+        self.live_value = PlotPanel(self.fig, panels, fig_index=10, label='episode value')
+        self.live_pcont = PlotPanel(self.fig, panels, fig_index=11, label='pcont')
+        self.exp_rew_vs_actual = PlotPanel(self.fig, panels, fig_index=12, label='reward: exp vs actual')
+        self.live_reward = PlotPanel(self.fig, panels, fig_index=13, label='episode reward')
+        self.live_dynamics = PlotPanel(self.fig, panels, fig_index=14, label='episode dynamics')
 
         self.fig.canvas.draw()
+        self.samples_in_histogram = 500
 
     def plot_rewards_histogram(self, b, R):
         with torch.no_grad():
-            if len(b.index) < 5000:
+            if len(b.index) < self.samples_in_histogram:
                 index = b.index
             else:
-                index = random.sample(b.index, 5000)
+                index = random.sample(b.index,self.samples_in_histogram)
             r = np.concatenate([b.trajectories[t][i].reward for t, i in index])
             s = np.stack([b.trajectories[t][i].state for t, i in index])
             R.eval()
@@ -320,10 +324,10 @@ class Viz:
         self.rew_plot.update(reward)
 
     def _draw_samples(self, b):
-        if len(b.index) < 5000:
+        if len(b.index) < self.samples_in_histogram:
             index = b.index
         else:
-            index = random.sample(b.index, 5000)
+            index = random.sample(b.index, self.samples_in_histogram)
         return index
 
     def update_pcont(self, b, pcont):
@@ -361,8 +365,8 @@ class Viz:
     def update_episode_reward(self, R, s, r):
         with torch.no_grad():
             pr = R(s).squeeze().cpu().numpy()
-            self.live_reward.update(pr)
-            self.live_reward.update(r)
+            self.live_reward.update(pr, 'predicted')
+            self.live_reward.update(r, 'received')
 
     def update_episode_value(self, value, s):
         with torch.no_grad():
@@ -403,10 +407,10 @@ class Viz:
 
     def update_dynamics(self, b, T, policy):
         with torch.no_grad():
-            if len(b.index) < 5000:
+            if len(b.index) < self.samples_in_histogram:
                 index = b.index
             else:
-                index = random.sample(b.index, 5000)
+                index = random.sample(b.index, self.samples_in_histogram)
             non_terminals = []
             for t, i in index:
                 if not b.trajectories[t][i].done:
@@ -423,6 +427,9 @@ class Viz:
             prob_next = prob_next.flatten()
             self.dynamics_hist.update(prob_next, bins=100)
 
+    def update_sampled_values(self, values):
+        values = np.concatenate(tuple(values))
+        self.sampled_value_hist.update(values, yscale='log')
 
 def gather_experience(buff, episode, env, policy, eps=0.0, eps_policy=None, expln_noise=0.0, render=True, seed=None,
                       delay=0.01):
@@ -452,6 +459,7 @@ def gather_experience(buff, episode, env, policy, eps=0.0, eps_policy=None, expl
             if render:
                 env.render()
                 time.sleep(delay)
+                #print(reward, state[-2])
             return action
 
         action = get_action(state, reward, done)
@@ -493,8 +501,9 @@ def make_env():
     # environment
     env = gym.make(args.env)
     #env = wm2.env.wrappers.ConcatPrev(env)
-    env = wm2.env.wrappers.AddDoneToState(env)
-    env = wm2.env.wrappers.RewardOneIfNotDone(env)
+    #env = wm2.env.wrappers.AddDoneToState(env)
+    #env = wm2.env.wrappers.RewardOneIfNotDone(env)
+    env = wm2.env.pybullet.PybulletWalkerWrapper(env)
     env.render()
 
     # def normalize_reward(reward):
@@ -541,7 +550,7 @@ def main(args):
     episode_refresh = wm2.utils.Cooldown(secs=30)
 
     # viz
-    viz = Viz()
+    viz = Viz(window_title=f'{wandb.run.project} {wandb.run.id}')
 
     env = make_env()
 
@@ -595,7 +604,18 @@ def main(args):
 
         def forward(self, state):
             state = torch.transpose(state, 0, -1)
-            reward = (1.0 - state[-1]).unsqueeze(0)
+            done_flag = state[-1]
+            target_dist = state[-2]
+            #target_dist = target_dist.clamp(max=0.999, min=0.0)
+            #reward = (1.0 - done_flag + (0.95 ** (target_dist * 1000.0 / 20.0)) * (1.0 - done_flag)).unsqueeze(0)
+            # reward = (1.0 - state[-1]) / ((1.0 - state[-2]).sqrt() + torch.finfo(state).eps)
+            eps = torch.finfo(target_dist.dtype).eps
+            #reward = ((1.5 - torch.log(1.5 - target_dist)) * (1.0 - done_flag)).unsqueeze(0)
+            # reward = (1.0 - done_flag)
+            #reward = 20 / (1 + torch.exp((target_dist - 0.7) * 10)) * (1.0-done_flag)
+            reward = 10 * (1.0 - target_dist) + 0.5
+            reward = reward * (1.0 - done_flag)
+            reward = reward.unsqueeze(0)
             reward = torch.transpose(reward, 0, -1)
             return reward
 
@@ -635,7 +655,7 @@ def main(args):
                 train = DataLoader(train, batch_size=args.batch_size, collate_fn=pad_collate_2, shuffle=True)
                 test = DataLoader(test, batch_size=args.batch_size, collate_fn=pad_collate_2, shuffle=True)
 
-                # T.dropout_on()
+                T.dropout_on()
 
                 # train transition model
                 for trajectories in train:
@@ -650,14 +670,14 @@ def main(args):
                     wandb.log({'transition_train': loss.item()})
                     T_saver.checkpoint(T, T_optim)
 
-                # T.dropout_off()
+                T.dropout_off()
 
-                for trajectories in test:
-                    input = torch.cat((trajectories.state, trajectories.action), dim=2).to(args.device)
-                    predicted_state, h = T(input)
-                    loss = t_criterion(trajectories, predicted_state)
-                    scr.update_slot('transition_test', f'Transition test loss  {loss.item()}')
-                    wandb.log({'transition_test': loss.item()})
+                # for trajectories in test:
+                #     input = torch.cat((trajectories.state, trajectories.action), dim=2).to(args.device)
+                #     predicted_state, h = T(input)
+                #     loss = t_criterion(trajectories, predicted_state)
+                #     scr.update_slot('transition_test', f'Transition test loss  {loss.item()}')
+                #     wandb.log({'transition_test': loss.item()})
 
             def train_reward():
 
@@ -685,11 +705,11 @@ def main(args):
                 #
                 # R.eval()
 
-                for state, reward in test:
-                    predicted_reward = R(state.to(args.device))
-                    loss = ((reward.to(args.device) - predicted_reward) ** 2).mean()
-                    scr.update_slot('reward_test', f'Reward test loss  {loss.item()}')
-                    wandb.log({'reward_test': loss.item()})
+                # for state, reward in test:
+                #     predicted_reward = R(state.to(args.device))
+                #     loss = ((reward.to(args.device) - predicted_reward) ** 2).mean()
+                #     scr.update_slot('reward_test', f'Reward test loss  {loss.item()}')
+                #     wandb.log({'reward_test': loss.item()})
 
             def train_pcont():
                 """ probability of continuing """
@@ -705,25 +725,33 @@ def main(args):
                     loss.backward()
                     pcont_optim.step()
                     scr.update_slot('pcont_train', f'pcont train loss  {loss.item()}')
-
                 pcont.eval()
-                for trajectories in test:
-                    predicted_pcont = pcont(trajectories.state.to(args.device))
-                    loss = ((predicted_pcont - trajectories.pcont.to(args.device)) ** 2).mean()
-                    scr.update_slot('pcont_test', f'pcont test loss  {loss.item()}')
 
-
+                # for trajectories in test:
+                #     predicted_pcont = pcont(trajectories.state.to(args.device))
+                #     loss = ((predicted_pcont - trajectories.pcont.to(args.device)) ** 2).mean()
+                #     scr.update_slot('pcont_test', f'pcont test loss  {loss.item()}')
 
             def train_behavior():
+
+                #logging
+                update_text = imagine_log_cooldown()
+                value_sample = deque(maxlen=100)
+
                 # Behaviour learning
                 train = ConcatDataset([SARDataset(sample_train_buff)])
                 train = DataLoader(train, batch_size=args.batch_size * 40, collate_fn=pad_collate_2, shuffle=True)
 
                 for trajectory in train:
-                    imagine = [torch.cat((trajectory.state, trajectory.action), dim=2).to(args.device)]
-                    reward = [R(trajectory.state.to(args.device))]
-                    p_of_continuing = [pcont(trajectory.state.to(args.device))]
-                    v = [value(trajectory.state.to(args.device))]
+
+                    trajectory.state = trajectory.state.to(args.device)
+                    trajectory.action = trajectory.action.to(args.device)
+
+                    # anchor on the sampled trajectory
+                    imagine = [torch.cat((trajectory.state, trajectory.action), dim=2)]
+                    reward = [R(trajectory.state)]
+                    p_of_continuing = [pcont(trajectory.state)]
+                    v = [value(trajectory.state)]
 
                     # imagine forward here
                     for tau in range(args.horizon):
@@ -765,13 +793,13 @@ def main(args):
                     rstack = rstack[1:, :]
 
                     # occasionally dump table to screen for analysis
-                    if imagine_log_cooldown():
+                    if update_text:
                         rewards = rstack[-1:, :, 0, 0, 0].detach().cpu().numpy()
-                        scr.update_table(rewards, title='imagined rewards and values')
+                        scr.update_table('rewards', rewards)
                         v = vstack[:, 0, 0, 0].unsqueeze(0).detach().cpu().numpy()
-                        scr.update_table(v, h=2)
-                        imagined_trajectory = torch.stack(imagine)[:, 0, 0, :].detach().cpu().numpy().T
-                        scr.update_table(imagined_trajectory, h=3, title='imagined trajectory')
+                        scr.update_table('values', v)
+                        #imagined_trajectory = torch.stack(imagine)[:, 0, 0, :].detach().cpu().numpy().T
+                        #scr.update_table('imagined trajectory', imagined_trajectory)
 
                     """ reduce the above matrix to values using the formula from the paper in 2 steps
                     first, compute VN for each k by applying discounts to each time-step and compute the expected value
@@ -785,6 +813,8 @@ def main(args):
                     # compute the expectation
                     steps = torch.linspace(2, H, H - 1, device=args.device).view(-1, 1, 1, 1)
                     VNK = rstack.sum(dim=1) / steps
+                    if update_text:
+                        scr.update_table('VNK', VNK[:, 0, 0, 0].unsqueeze(0).detach().cpu().numpy())
 
                     """ now we are left with a single column matrix in form
                     VN(k=1)
@@ -802,30 +832,36 @@ def main(args):
                         torch.arange(VNK.size(0), device=args.device)).view(-1, 1, 1, 1)
                     lam[0:-1] = lam[0:-1] * (1 - args.lam)
                     VL = (VNK * lam).sum(0)
+                    if update_text:
+                        scr.update_table('VL', VL[:, 0, 0].detach().cpu().numpy())
+
 
                     "backprop loss"
-                    policy_optim.zero_grad(), value_optim.zero_grad()
-                    T_optim.zero_grad(),  pcont_optim.zero_grad(), #R_optim.zero_grad(),
+                    policy_optim.zero_grad()#, value_optim.zero_grad()
+                    #T_optim.zero_grad(),  pcont_optim.zero_grad(), #R_optim.zero_grad(),
                     policy_loss = -VL.mean()
                     policy_loss.backward()
                     clip_grad_norm_(parameters=policy.parameters(), max_norm=100.0)
-                    viz.sample_grad_norm(policy)
                     policy_optim.step()
 
                     "housekeeping"
+                    viz.sample_grad_norm(policy)
                     scr.update_slot('policy_loss', f'Policy loss  {policy_loss.item()}')
                     wandb.log({'policy_loss': policy_loss.item()})
                     policy_saver.checkpoint(policy, policy_optim)
 
                     " regress value against tau ie: the initial estimated value... "
-                    policy_optim.zero_grad(), value_optim.zero_grad()
-                    T_optim.zero_grad(),  pcont_optim.zero_grad(), #R_optim.zero_grad(),
-                    VN = VL.detach().reshape(L * N, -1)
-                    values = value(trajectory.state.reshape(L * N, -1).to(args.device))
+                    value.train()
+                    value_optim.zero_grad() # policy_optim.zero_grad(),
+                    #T_optim.zero_grad(),  #pcont_optim.zero_grad(), #R_optim.zero_grad(),
+                    VN = VL.detach()
+                    value_sample.append(VN.clone().detach().cpu().flatten().numpy())
+                    values = value(trajectory.state)
                     value_loss = ((VN - values) ** 2).mean() / 2
                     value_loss.backward()
-                    clip_grad_norm_(parameters=value.parameters(), max_norm=100.0)
+                    #clip_grad_norm_(parameters=value.parameters(), max_norm=100.0)
                     value_optim.step()
+                    value.eval()
 
                     "housekeeping"
                     scr.update_slot('value_loss', f'Value loss  {value_loss.item()}')
@@ -833,6 +869,8 @@ def main(args):
                     value_saver.checkpoint(value, value_optim)
                     if value_saver.is_best(value_loss):
                         value_saver.save(value, 'best')
+                    if update_text:
+                        viz.update_sampled_values(value_sample)
 
             train_dynamics()
             train_reward()
@@ -862,7 +900,7 @@ def main(args):
         if reward > best_ave_reward:
             sampled_rewards = []
 
-            for _ in range(20):
+            for _ in range(5):
                 dummy_buffer, reward = gather_experience(dummy_buffer, train_episode, env, policy,
                                                        eps=0.0, eps_policy=env.connector.random_policy,
                                                        expln_noise=0.0, seed=args.seed)
@@ -928,7 +966,7 @@ if __name__ == '__main__':
         'horizon': 15,
         'discount': 0.99,
         'lam': 0.95,
-        'exploration_noise': 0.20,
+        'exploration_noise': 0.3,
 
         'dynamics_lr': 1e-4,
         'dynamics_layers': 1,
@@ -939,7 +977,7 @@ if __name__ == '__main__':
         'pcont_nonlin': 'nn.ELU',
 
         'value_lr': 2e-5,
-        'value_hidden_dims': [300],
+        'value_hidden_dims': [300, 300],
         'value_nonlin': 'nn.ELU',
 
         'policy_lr': 2e-5,

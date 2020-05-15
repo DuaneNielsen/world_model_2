@@ -160,6 +160,9 @@ class Curses:
 
         self.height, self.width = self.stdscr.getmaxyx()
 
+        self.table_start = {}
+        self.table_insert_line = 0
+
         self.bar = OrderedDict()
 
     def _resize(self):
@@ -212,12 +215,22 @@ class Curses:
         except curses.error:
             pass
 
-    def update_table(self, table, h=0, title=None):
+    def update_table(self, title, table):
+        if len(table.shape) == 1:
+            table = np.expand_dims(table, axis=0)
+
+        rows = table.shape[0]
+        if title not in self.table_start:
+            self.table_start[title] = self.table_insert_line
+            self.table_insert_line += rows + 1
+
+        h = self.table_start[title]
         assert len(table.shape) == 2
+        h = self.table_start[title]
         if title is not None:
             self._write_row(title, h=h)
             h = h + 1
-        for i in range(table.shape[0]):
+        for i in range(rows):
             table_str = np.array2string(table[i], max_line_width=self.width)
             self._write_row(table_str, i + h)
         self.refresh()
