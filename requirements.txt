@@ -6,4 +6,4 @@ matplotlib
 pybullet
 opencv-python
 tqdm
--e git+https://github.com/benelot/pybullet-gym
+-e git+https://github.com/benelot/pybullet-gym#egg=pybullet-gym
