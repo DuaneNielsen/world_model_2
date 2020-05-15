@@ -29,12 +29,12 @@ import pybulletgym
 
 import matplotlib.pyplot as plt
 
-from distributions import ScaledTanhTransformedGaussian
-from viz import Curses
+from wm2.distributions import ScaledTanhTransformedGaussian
+from wm2.viz import Curses
 from wm2.data.datasets import Buffer, SARDataset, SARNextDataset, SimpleRewardDataset, DummyBuffer, \
     SubsetSequenceBuffer
 from wm2.utils import Pbar
-from data.utils import pad_collate_2
+from wm2.data.utils import pad_collate_2
 import wm2.utils
 import wm2.env.wrappers
 from wm2.env.LunarLander_v3 import LunarLanderConnector

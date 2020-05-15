@@ -10,7 +10,7 @@ from torch.distributions import Categorical
 from torch.utils.data import Dataset
 from tqdm import tqdm
 
-from data.utils import SARI, one_hot
+from wm2.data.utils import SARI, one_hot
 
 
 class DummyBuffer:

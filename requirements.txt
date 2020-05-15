@@ -4,5 +4,4 @@ torch
 wandb
 matplotlib
 pybullet
-
--e git://github.com/benelot/pybullet-gym
+git+https://github.com/benelot/pybullet-gym

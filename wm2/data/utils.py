@@ -2,7 +2,7 @@ import numpy as np
 import torch
 from torch.utils.data import Subset
 
-from utils import TensorNamespace
+from wm2.utils import TensorNamespace
 
 
 class SARI:
