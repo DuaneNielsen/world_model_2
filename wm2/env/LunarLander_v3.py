@@ -34,7 +34,7 @@ import gym
 from gym import spaces
 from gym.utils import seeding, EzPickle
 
-from distributions import ScaledTanhTransformedGaussian
+from wm2.distributions import ScaledTanhTransformedGaussian
 
 FPS = 50
 SCALE = 30.0   # affects how fast-paced the game is, forces should be adjusted as well

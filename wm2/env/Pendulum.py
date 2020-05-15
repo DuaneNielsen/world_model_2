@@ -2,7 +2,7 @@ import numpy as np
 import torch
 from matplotlib import pyplot as plt
 
-from distributions import TanhTransformedGaussian
+from wm2.distributions import TanhTransformedGaussian
 
 
 class PendulumConnector:

@@ -3,6 +3,7 @@ import numpy as np
 import gym.spaces as spaces
 from collections import deque
 
+
 class AtariAriVector(gym.Wrapper):
     def __init__(self, env):
         gym.Wrapper.__init__(self, env)

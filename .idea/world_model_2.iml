@@ -5,7 +5,9 @@
       <sourceFolder url="file://$MODULE_DIR$/wm2" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/data" />
       <excludeFolder url="file://$MODULE_DIR$/wandb" />
+      <excludeFolder url="file://$MODULE_DIR$/wandb/dryrun-20200502_181243-ncuieqtx" />
     </content>
+    <content url="file://$MODULE_DIR$/wandb/dryrun-20200502_181243-ncuieqtx" />
     <orderEntry type="jdk" jdkName="Python 3.6 (keypoints)" jdkType="Python SDK" />
     <orderEntry type="sourceFolder" forTests="false" />
     <orderEntry type="module" module-name="keypoints" />

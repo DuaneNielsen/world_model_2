@@ -1,6 +1,6 @@
 import torch
 import torch.distributions as dist
-from distributions import ScaledTanhTransformedGaussian
+from wm2.distributions import ScaledTanhTransformedGaussian
 import numpy as np
 import gym
 import math
