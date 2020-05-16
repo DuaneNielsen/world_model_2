@@ -1,5 +1,6 @@
 import curses
-from collections import OrderedDict
+import random
+from collections import OrderedDict, deque
 
 from matplotlib import pyplot as plt
 from time import sleep
@@ -253,7 +254,7 @@ class LineViz:
         self.l_value, = self.ax4.plot(s, z, 'b-', label='value(state)')
         self.ax1.legend(), self.ax2.legend(), self.ax3.legend(), self.ax4.legend()
 
-    def update(self, s, policy, R, value):
+    def update(self, s, policy, R, value, T):
 
         a = policy.mu(s)
         r = R(s)
@@ -279,3 +280,242 @@ class LineViz:
         self.ax4.relim()
         self.ax4.autoscale_view()
         self.fig.canvas.draw()
+
+
+class HistogramPanel:
+    def __init__(self, fig, panels, fig_index, label):
+        self.fig = fig
+        self.label = label
+        self.hist = fig.add_subplot(*panels, fig_index, )
+        self.hist.set_title(self.label)
+        self.hist.hist(np.zeros((1,)), label=label)
+        self.hist.legend(label)
+        self.hist.relim()
+        self.hist.autoscale_view()
+        self.hist.legend()
+
+    def update(self, data, bins=100, yscale='linear'):
+        """
+        update the histogram
+        :param data: numpy array of dim 1
+        :return:
+        """
+        self.hist.clear()
+        self.hist.hist(data, bins=bins)
+        self.hist.set_title(self.label)
+        self.hist.set_yscale(yscale)
+        self.hist.relim()
+        self.hist.autoscale_view()
+        self.fig.canvas.draw()
+
+
+class PlotPanel:
+    def __init__(self, fig, panels, fig_index, label, length=1000):
+        self.fig = fig
+        self.label = label
+        self.plot = fig.add_subplot(*panels, fig_index, )
+        self.plot.set_title(self.label)
+
+    def update(self, sequence, label=''):
+        self.plot.set_title(self.label)
+        self.plot.plot(sequence, label=label)
+        self.plot.relim()
+        self.plot.autoscale_view()
+        self.fig.canvas.draw()
+
+    def reset(self):
+        self.plot.clear()
+
+
+class LiveLine:
+    def __init__(self, fig, panels, fig_index, label, length=1000):
+        self.fig = fig
+        self.label = label
+        self.live = fig.add_subplot(*panels, fig_index, )
+        self.live.set_title(self.label)
+        self.rew_live_length = length
+        self.dq = deque(maxlen=self.rew_live_length)
+
+    def update(self, data):
+        self.live.clear()
+        self.dq.append(data)
+        y = np.array(self.dq)
+        self.live.set_title(self.label)
+        self.live.plot(y)
+        self.live.relim()
+        self.live.autoscale_view()
+        self.fig.canvas.draw()
+
+    def reset(self):
+        self.live.clear()
+        self.dq = deque(maxlen=self.rew_live_length)
+        self.fig.canvas.draw()
+
+
+class Viz:
+    def __init__(self, args, window_title=None):
+        plt.ion()
+        self.fig = plt.figure(num=None, figsize=(18, 12), dpi=80, facecolor='w', edgecolor='k', )
+        if window_title:
+            self.fig.canvas.set_window_title(window_title)
+        self.args = args
+
+        panels = (4, 5)
+        self.rew_plot = LiveLine(self.fig, panels, 1, label='episode reward')
+
+        self.dynamics_hist = HistogramPanel(self.fig, panels, 2, label='dynamics')
+        self.rew_hist = HistogramPanel(self.fig, panels, 3, label='reward')
+        self.prew_hist = HistogramPanel(self.fig, panels, 4, label='predicted_reward')
+        self.raw_pcont_hist = HistogramPanel(self.fig, panels, 5, label='measured pcont')
+        self.est_pcont_hist = HistogramPanel(self.fig, panels, 6, label='est pcont')
+        self.value_hist = HistogramPanel(self.fig, panels, 7, label='value')
+        self.sampled_value_hist = HistogramPanel(self.fig, panels, 8, label='sampled value')
+
+        self.policy_grad_norm = LiveLine(self.fig, panels, 9, label='policy gradient')
+        self.live_policy_entropy = PlotPanel(self.fig, panels, fig_index=10, label='entropy')
+
+        self.live_value = PlotPanel(self.fig, panels, fig_index=11, label='episode value')
+        self.live_pcont = PlotPanel(self.fig, panels, fig_index=12, label='pcont')
+        self.exp_rew_vs_actual = PlotPanel(self.fig, panels, fig_index=13, label='reward: exp vs actual')
+        self.live_reward = PlotPanel(self.fig, panels, fig_index=14, label='episode reward')
+        self.live_dynamics = PlotPanel(self.fig, panels, fig_index=15, label='episode dynamics prob')
+        self.live_dynamics_entropy = PlotPanel(self.fig, panels, fig_index=16, label='episode dyn ent')
+
+
+        self.fig.canvas.draw()
+        self.samples_in_histogram = 500
+
+    def plot_rewards_histogram(self, b, R):
+        with torch.no_grad():
+            if len(b.index) < self.samples_in_histogram:
+                index = b.index
+            else:
+                index = random.sample(b.index,self.samples_in_histogram)
+            r = np.concatenate([b.trajectories[t][i].reward for t, i in index])
+            s = np.stack([b.trajectories[t][i].state for t, i in index])
+            R.eval()
+            pr = R(torch.from_numpy(s).to(device=self.args.device))
+            pr = pr.cpu().detach().numpy()
+            R.train()
+
+            self.rew_hist.update(r, bins=100, yscale='log')
+            self.prew_hist.update(pr, bins=100, yscale='log')
+            self.fig.canvas.draw()
+
+    def update_rewards(self, reward):
+        self.rew_plot.update(reward)
+
+    def _draw_samples(self, b):
+        if len(b.index) < self.samples_in_histogram:
+            index = b.index
+        else:
+            index = random.sample(b.index, self.samples_in_histogram)
+        return index
+
+    def update_pcont(self, b, pcont):
+        with torch.no_grad():
+            index = self._draw_samples(b)
+            s = np.stack([b.trajectories[t][i].state for t, i in index])
+            pcont_raw = np.stack([b.trajectories[t][i].pcont for t, i in index])
+            pred_pcont = pcont(torch.from_numpy(s).to(device=self.args.device))
+            self.raw_pcont_hist.update(pcont_raw, bins=100, yscale='log')
+            self.est_pcont_hist.update(pred_pcont.cpu().detach().numpy(), bins=100, yscale='log')
+
+    def update_value(self, b, value):
+        with torch.no_grad():
+            index = self._draw_samples(b)
+            s = np.stack([b.trajectories[t][i].state for t, i in index])
+            pred_value = value(torch.from_numpy(s).to(device=self.args.device))
+            self.value_hist.update(pred_value.cpu().detach().numpy(), bins=100, yscale='log')
+
+    def update_trajectory_plots(self, value, R, pcont, T, b, trajectory_id, entropy):
+        with torch.no_grad():
+            self.live_value.reset(), self.live_pcont.reset(), self.exp_rew_vs_actual.reset()
+            self.live_reward.reset(), self.live_dynamics.reset(), self.live_policy_entropy.reset()
+            self.live_dynamics_entropy.reset()
+            s = np.stack(i.state for i in b.trajectories[trajectory_id])
+            a = np.stack(i.action for i in b.trajectories[trajectory_id])
+            r = np.stack(i.reward for i in b.trajectories[trajectory_id])
+            p = np.stack(i.pcont for i in b.trajectories[trajectory_id])
+            s = torch.from_numpy(s).to(device=self.args.device)
+            a = torch.from_numpy(a).to(device=self.args.device)
+            self.update_episode_reward(R, s, r)
+            self.update_episode_pcont(pcont, s, p)
+            self.update_episode_expected_reward(T, R, s, a, r)
+            self.update_episode_value(value, s)
+            self.update_episode_dynamics(T, s, a)
+            self.update_policy_entropy(entropy)
+
+    def update_episode_reward(self, R, s, r):
+        with torch.no_grad():
+            pr = R(s).squeeze().cpu().numpy()
+            self.live_reward.update(pr, 'predicted')
+            self.live_reward.update(r, 'received')
+
+    def update_episode_value(self, value, s):
+        with torch.no_grad():
+            v = value(s).squeeze().cpu().numpy()
+            self.live_value.update(v)
+
+    def update_episode_pcont(self, pcont, s, p):
+        with torch.no_grad():
+            pc = pcont(s).squeeze().cpu().numpy()
+            self.live_pcont.update(pc)
+            self.live_pcont.update(p)
+
+    def update_episode_expected_reward(self, T, R, s, a, r):
+        with torch.no_grad():
+            sa = torch.cat((s, a), dim=1)
+            pred_next_dist, hx = T(sa.unsqueeze(1))
+            next_state = pred_next_dist.loc.squeeze()
+            pr = R(next_state).cpu().numpy()
+            self.exp_rew_vs_actual.update(pr)
+            self.exp_rew_vs_actual.update(r)
+
+    def update_episode_dynamics(self, T, s, a):
+        with torch.no_grad():
+            sa = torch.cat((s[:-1], a[:-1]), dim=1)
+            dist, hx = T(sa.unsqueeze(1))
+            lp = torch.exp(dist.log_prob(s[1:].unsqueeze((1)))).squeeze().mean(1)
+            lp = lp.squeeze().cpu().numpy()
+            entropy = dist.entropy().squeeze().mean(1).cpu().numpy()
+            self.live_dynamics.update(lp)
+            self.live_dynamics_entropy.update(entropy)
+
+    def sample_grad_norm(self, model, sample=0.01):
+        if random.random() < sample:
+            total_norm = 0
+            for p in model.parameters():
+                param_norm = p.grad.data.norm(2)
+                total_norm += param_norm.item() ** 2
+            total_norm = total_norm ** (1. / 2)
+            self.policy_grad_norm.update(total_norm)
+
+    def update_dynamics(self, b, T, policy):
+        with torch.no_grad():
+            if len(b.index) < self.samples_in_histogram:
+                index = b.index
+            else:
+                index = random.sample(b.index, self.samples_in_histogram)
+            non_terminals = []
+            for t, i in index:
+                if not b.trajectories[t][i].done:
+                    non_terminals.append((t, i))
+            s = np.stack([b.trajectories[t][i].state for t, i in non_terminals])
+            a = np.stack([b.trajectories[t][i].action for t, i in non_terminals])
+            s = torch.from_numpy(s).to(device=self.args.device)
+            a = torch.from_numpy(a).to(device=self.args.device)
+            sa = torch.cat((s, a), dim=1)
+            next_s = np.stack([b.trajectories[t][i+1].state for t, i in non_terminals])
+            pred_next_dist, hx = T(sa.unsqueeze(0))
+            prob_next = pred_next_dist.log_prob(torch.from_numpy(next_s).to(device=self.args.device)).exp()
+            prob_next = prob_next.cpu().detach().numpy()
+            prob_next = prob_next.flatten()
+            self.dynamics_hist.update(prob_next, bins=100)
+
+    def update_sampled_values(self, values):
+        values = np.concatenate(tuple(values))
+        self.sampled_value_hist.update(values, yscale='log')
+
+    def update_policy_entropy(self, entropy):
+        self.live_policy_entropy.update(entropy, 'entropy')
