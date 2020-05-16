@@ -22,6 +22,7 @@ import torch.nn.functional as F
 import torch.backends.cudnn
 import torch.cuda
 import numpy as np
+import warnings
 import wandb
 import gym
 import gym.wrappers
@@ -39,7 +40,6 @@ import wm2.utils
 import wm2.env.wrappers
 from wm2.env.LunarLander_v3 import LunarLanderConnector
 from wm2.env.pybullet import PyBulletConnector
-
 
 class MLP(nn.Module):
     def __init__(self, layers, nonlin=None, dropout=0.2):
@@ -909,7 +909,7 @@ def main(args):
         wandb.log({'reward': reward})
         viz.update_rewards(reward)
         recent_reward.append(reward)
-        scr.update_slot('eps', f'exploration_noise: {args.exploration_noise}')
+        scr.update_slot('eps', f'exploration_noise: {args.exploration_noise}, forward_slope: {args.forward_slope}')
         rr = ''
         for reward in recent_reward:
             rr += f' {reward:.5f},'
@@ -1075,8 +1075,11 @@ if __name__ == '__main__':
     if args.seed is not None:
         determinism(args.seed)
 
-    if args.demo == 'off':
-        wandb.init(config=vars(args))
-        curses.wrapper(main(args))
-    else:
-        demo(args)
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=FutureWarning)
+
+        if args.demo == 'off':
+            wandb.init(config=vars(args))
+            curses.wrapper(main(args))
+        else:
+            demo(args)

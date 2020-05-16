@@ -155,7 +155,7 @@ class Curses:
         curses.start_color()
         curses.use_default_colors()
 
-        curses.init_pair(1, 0, -1)  # slot text color
+        curses.init_pair(1, 3, -1)  # slot text color
         curses.init_pair(2, 139, -1)  # status bar color
 
         self.height, self.width = self.stdscr.getmaxyx()
