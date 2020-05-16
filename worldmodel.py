@@ -609,7 +609,7 @@ def main(args):
     #                     layers=args.transition_layers).to(args.device)
 
     T_optim = Adam(T.parameters(), lr=args.dynamics_lr)
-    t_criterion = log_prob_loss_entropy
+    t_criterion = log_prob_loss
 
     # reward model
     # R = HandcraftedPrior(args.state_dims, args.reward_hidden_dims, nonlin=args.nonlin).to(args.device)
