@@ -27,7 +27,7 @@ import gym
 import gym.wrappers
 import pybulletgym
 
-from viz import Viz
+from wm2.viz import Viz
 from wm2.distributions import ScaledTanhTransformedGaussian
 from wm2.viz import Curses
 from wm2.data.datasets import Buffer, SARDataset, SARNextDataset, SimpleRewardDataset, DummyBuffer, \
