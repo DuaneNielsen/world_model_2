@@ -23,7 +23,7 @@ class DummyBuffer:
 
 
 class Buffer:
-    def __init__(self, p_cont_algo='invexp', horizon=0):
+    def __init__(self, p_cont_algo='invexp', horizon=3):
         self.trajectories = []
         self.index = []
         self.rewards_count = 0

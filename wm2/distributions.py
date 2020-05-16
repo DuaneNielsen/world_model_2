@@ -76,10 +76,10 @@ class ScaledTanhTransformedGaussian(TransformedDistribution):
 
     @property
     def variance(self):
-        return None
+        return self.base_dist.variance()
 
     def enumerate_support(self, expand=True):
-        pass
+        return self.base_dist.support()
 
     def entropy(self):
-        pass
+        return self.base_dist.entropy()

@@ -299,6 +299,7 @@ class Viz:
         self.exp_rew_vs_actual = PlotPanel(self.fig, panels, fig_index=12, label='reward: exp vs actual')
         self.live_reward = PlotPanel(self.fig, panels, fig_index=13, label='episode reward')
         self.live_dynamics = PlotPanel(self.fig, panels, fig_index=14, label='episode dynamics')
+        self.live_entropy = PlotPanel(self.fig, panels, fig_index=15, label='entropy')
 
         self.fig.canvas.draw()
         self.samples_in_histogram = 500
@@ -346,10 +347,10 @@ class Viz:
             pred_value = value(torch.from_numpy(s).to(device=args.device))
             self.value_hist.update(pred_value.cpu().detach().numpy(), bins=100, yscale='log')
 
-    def update_trajectory_plots(self, value, R, pcont, T, b, trajectory_id):
+    def update_trajectory_plots(self, value, R, pcont, T, b, trajectory_id, entropy):
         with torch.no_grad():
             self.live_value.reset(), self.live_pcont.reset(), self.exp_rew_vs_actual.reset()
-            self.live_reward.reset(), self.live_dynamics.reset()
+            self.live_reward.reset(), self.live_dynamics.reset(), self.live_entropy.reset()
             s = np.stack(i.state for i in b.trajectories[trajectory_id])
             a = np.stack(i.action for i in b.trajectories[trajectory_id])
             r = np.stack(i.reward for i in b.trajectories[trajectory_id])
@@ -361,6 +362,7 @@ class Viz:
             self.update_episode_expected_reward(T, R, s, a, r)
             self.update_episode_value(value, s)
             self.update_episode_dynamics(T, s, a)
+            self.update_entropy(entropy)
 
     def update_episode_reward(self, R, s, r):
         with torch.no_grad():
@@ -431,6 +433,10 @@ class Viz:
         values = np.concatenate(tuple(values))
         self.sampled_value_hist.update(values, yscale='log')
 
+    def update_entropy(self, entropy):
+        self.live_entropy.update(entropy, 'entropy')
+
+
 def gather_experience(buff, episode, env, policy, eps=0.0, eps_policy=None, expln_noise=0.0, render=True, seed=None,
                       delay=0.01):
     with torch.no_grad():
@@ -440,15 +446,18 @@ def gather_experience(buff, episode, env, policy, eps=0.0, eps_policy=None, expl
             env.seed(seed)
         state, reward, done = env.reset(), 0.0, False
         episode_reward += reward
+        episode_entropy = []
 
         def get_action(state, reward, done):
             t_state = env.connector.policy_prepro(state, args.device).unsqueeze(0)
             if random.random() >= eps:
-                action = policy(t_state).rsample()
+                action_dist = policy(t_state)
+                action = action_dist.rsample()
                 action = Normal(action, expln_noise).sample()
                 action = action.clamp(min=-1.0, max=1.0)
             else:
-                action = eps_policy(t_state).rsample()
+                action_dist = eps_policy(t_state)
+                action = action_dist.rsample()
             action = env.connector.action_prepro(action)
             buff.append(episode,
                         env.connector.buffer_prepro(state),
@@ -460,16 +469,18 @@ def gather_experience(buff, episode, env, policy, eps=0.0, eps_policy=None, expl
                 env.render()
                 time.sleep(delay)
                 #print(reward, state[-2])
-            return action
+            return action, action_dist
 
-        action = get_action(state, reward, done)
+        action, action_dist = get_action(state, reward, done)
+        episode_entropy += [action_dist.entropy().mean().item()]
 
         while not done:
             state, reward, done, info = env.step(action)
             episode_reward += reward
-            action = get_action(state, reward, done)
+            action, action_dist = get_action(state, reward, done)
+            episode_entropy += [action_dist.entropy().mean().item()]
 
-    return buff, episode_reward
+    return buff, episode_reward, episode_entropy
 
 
 def gather_seed_episodes(env, seed_episodes):
@@ -495,6 +506,15 @@ def log_prob_loss(trajectories, predicted_state):
     div = kl_divergence(prior, posterior).mean()
     log_p = predicted_state.log_prob(trajectories.next_state.to(args.device)).mean()
     return div * 1.0 - log_p
+
+
+def log_prob_loss_entropy(trajectories, predicted_state):
+    prior = Normal(predicted_state.loc[0:-1], predicted_state.scale[0:-1])
+    posterior = Normal(predicted_state.loc[1:], predicted_state.scale[1:])
+    div = kl_divergence(prior, posterior).mean()
+    log_p = predicted_state.log_prob(trajectories.next_state.to(args.device)).mean()
+    entropy = posterior.entropy().mean()
+    return div * 1.0 - log_p - entropy
 
 
 def make_env():
@@ -589,7 +609,7 @@ def main(args):
     #                     layers=args.transition_layers).to(args.device)
 
     T_optim = Adam(T.parameters(), lr=args.dynamics_lr)
-    t_criterion = log_prob_loss
+    t_criterion = log_prob_loss_entropy
 
     # reward model
     # R = HandcraftedPrior(args.state_dims, args.reward_hidden_dims, nonlin=args.nonlin).to(args.device)
@@ -613,7 +633,7 @@ def main(args):
             #reward = ((1.5 - torch.log(1.5 - target_dist)) * (1.0 - done_flag)).unsqueeze(0)
             # reward = (1.0 - done_flag)
             #reward = 20 / (1 + torch.exp((target_dist - 0.7) * 10)) * (1.0-done_flag)
-            reward = 10 * (1.0 - target_dist) + 0.5
+            reward = args.forward_slope * (1.0 - target_dist) + 0.5
             reward = reward * (1.0 - done_flag)
             reward = reward.unsqueeze(0)
             reward = torch.transpose(reward, 0, -1)
@@ -664,7 +684,7 @@ def main(args):
                     predicted_state, h = T(input)
                     loss = t_criterion(trajectories, predicted_state)
                     loss.backward()
-                    clip_grad_norm_(parameters=T.parameters(), max_norm=100.0)
+                    #clip_grad_norm_(parameters=T.parameters(), max_norm=100.0)
                     T_optim.step()
                     scr.update_slot('transition_train', f'Transition training loss {loss.item()}')
                     wandb.log({'transition_train': loss.item()})
@@ -841,7 +861,7 @@ def main(args):
                     #T_optim.zero_grad(),  pcont_optim.zero_grad(), #R_optim.zero_grad(),
                     policy_loss = -VL.mean()
                     policy_loss.backward()
-                    clip_grad_value_(policy.parameters(), 0.001)
+                    #clip_grad_value_(policy.parameters(), 0.001)
                     policy_optim.step()
 
                     "housekeeping"
@@ -878,11 +898,11 @@ def main(args):
             train_behavior()
 
         "run the policy on the environment and collect experience"
-        train_buff, reward = gather_experience(train_buff, train_episode, env, policy,
+        train_buff, reward, entropy = gather_experience(train_buff, train_episode, env, policy,
                                                eps=0.0, eps_policy=env.connector.random_policy, seed=args.seed,
                                                render=render_cooldown(), expln_noise=args.exploration_noise)
         if episode_refresh():
-            viz.update_trajectory_plots(value, R, pcont, T, train_buff, train_episode)
+            viz.update_trajectory_plots(value, R, pcont, T, train_buff, train_episode, entropy)
 
         train_episode += 1
 
@@ -901,7 +921,7 @@ def main(args):
             sampled_rewards = []
 
             for _ in range(5):
-                dummy_buffer, reward = gather_experience(dummy_buffer, train_episode, env, policy,
+                dummy_buffer, reward, entropy = gather_experience(dummy_buffer, train_episode, env, policy,
                                                        eps=0.0, eps_policy=env.connector.random_policy,
                                                        expln_noise=0.0, seed=args.seed)
                 sampled_rewards.append(reward)
@@ -910,7 +930,7 @@ def main(args):
                 policy_saver.save(policy, 'best', ave=mean(sampled_rewards), max=max(sampled_rewards),
                                   explr_noise=args.exploration_noise)
 
-        test_buff, reward = gather_experience(test_buff, test_episode, env, policy,
+        test_buff, reward, entropy = gather_experience(test_buff, test_episode, env, policy,
                                               eps=0.0, eps_policy=env.connector.random_policy,
                                               render=False, expln_noise=args.exploration_noise, seed=args.seed)
         test_episode += 1
@@ -949,7 +969,7 @@ def demo(args):
                 msg += f'{arg}: {value} '
         print(msg)
         policy.load_state_dict(load_dict['model'])
-        train_buff, reward = gather_experience(dummy_buffer, 0, env, policy,
+        train_buff, reward, entropy = gather_experience(dummy_buffer, 0, env, policy,
                                                eps=0.0, eps_policy=env.connector.random_policy,
                                                render=True, delay=1.0 / args.fps)
 
@@ -987,6 +1007,8 @@ if __name__ == '__main__':
         'reward_lr': 1e-4,
         'reward_hidden_dims': [300, 300],
         'reward_nonlin': 'nn.ELU',
+
+        'forward_slope': 60,
 
         'demo': 'off',
         'seed': None,
