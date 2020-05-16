@@ -1,4 +1,4 @@
-env: 'HalfCheetahPyBulletEnv-v0'
+env: 'HalfCheetahPyBulletEnv-v1'
 connector: 'wm2.env.pybullet.PyBulletConnector'
 seed_episodes: 5
 collect_interval: 10

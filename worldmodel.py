@@ -220,7 +220,7 @@ def gather_experience(buff, episode, env, policy, eps=0.0, eps_policy=None, expl
             if render:
                 env.render()
                 time.sleep(delay)
-                #print(reward, state[-2])
+                # print(reward, state[-2], state[-9:-3])
             return action, action_dist
 
         action, action_dist = get_action(state, reward, done)
@@ -263,10 +263,10 @@ def log_prob_loss(trajectories, predicted_state):
 def log_prob_loss_entropy(trajectories, predicted_state):
     prior = Normal(predicted_state.loc[0:-1], predicted_state.scale[0:-1])
     posterior = Normal(predicted_state.loc[1:], predicted_state.scale[1:])
-    div = kl_divergence(prior, posterior).mean()
+    #div = kl_divergence(prior, posterior).mean()
     log_p = predicted_state.log_prob(trajectories.next_state.to(args.device)).mean()
     entropy = posterior.entropy().mean()
-    return div * 1.0 - log_p - entropy
+    return - log_p - entropy
 
 
 def make_env():
@@ -275,7 +275,7 @@ def make_env():
     #env = wm2.env.wrappers.ConcatPrev(env)
     #env = wm2.env.wrappers.AddDoneToState(env)
     #env = wm2.env.wrappers.RewardOneIfNotDone(env)
-    env = wm2.env.pybullet.PybulletWalkerWrapper(env)
+    env = wm2.env.pybullet.PybulletWalkerWrapper(env, args)
     env.render()
 
     # def normalize_reward(reward):
@@ -361,7 +361,7 @@ def main(args):
     #                     layers=args.transition_layers).to(args.device)
 
     T_optim = Adam(T.parameters(), lr=args.dynamics_lr)
-    t_criterion = log_prob_loss
+    t_criterion = log_prob_loss_simple
 
     # reward model
     # R = HandcraftedPrior(args.state_dims, args.reward_hidden_dims, nonlin=args.nonlin).to(args.device)
@@ -377,15 +377,15 @@ def main(args):
         def forward(self, state):
             state = torch.transpose(state, 0, -1)
             done_flag = state[-1]
-            target_dist = state[-2]
+            speed = state[-2]
             #target_dist = target_dist.clamp(max=0.999, min=0.0)
             #reward = (1.0 - done_flag + (0.95 ** (target_dist * 1000.0 / 20.0)) * (1.0 - done_flag)).unsqueeze(0)
             # reward = (1.0 - state[-1]) / ((1.0 - state[-2]).sqrt() + torch.finfo(state).eps)
-            eps = torch.finfo(target_dist.dtype).eps
+            eps = torch.finfo(speed.dtype).eps
             #reward = ((1.5 - torch.log(1.5 - target_dist)) * (1.0 - done_flag)).unsqueeze(0)
             # reward = (1.0 - done_flag)
             #reward = 20 / (1 + torch.exp((target_dist - 0.7) * 10)) * (1.0-done_flag)
-            reward = args.forward_slope * (1.0 - target_dist) + 0.5
+            reward = args.forward_slope * F.relu(speed) + 0.5
             reward = reward * (1.0 - done_flag)
             reward = reward.unsqueeze(0)
             reward = torch.transpose(reward, 0, -1)
@@ -731,18 +731,18 @@ if __name__ == '__main__':
     defaults = {
         'env': 'HalfCheetahPyBulletEnv-v0',
         'connector': 'wm2.env.pybullet.PyBulletConnector',
-        'seed_episodes': 5,
+        'seed_episodes': 400,
         'collect_interval': 10,
         'batch_size': 40,
         'device': 'cuda:0',
         'horizon': 15,
         'discount': 0.99,
         'lam': 0.95,
-        'exploration_noise': 0.3,
+        'exploration_noise': 0.2,
 
         'dynamics_lr': 1e-4,
         'dynamics_layers': 1,
-        'dynamics_hidden_dim': 48,
+        'dynamics_hidden_dim': 300,
 
         'pcont_lr': 1e-4,
         'pcont_hidden_dims': [48, 48],
@@ -760,7 +760,7 @@ if __name__ == '__main__':
         'reward_hidden_dims': [300, 300],
         'reward_nonlin': 'nn.ELU',
 
-        'forward_slope': 60,
+        'forward_slope': 20,
 
         'demo': 'off',
         'seed': None,
