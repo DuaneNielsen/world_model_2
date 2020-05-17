@@ -23,14 +23,14 @@ class DummyBuffer:
 
 
 class Buffer:
-    def __init__(self, p_cont_algo='invexp', horizon=3):
+    def __init__(self, p_cont_algo='step', terminal_repeats=3):
         self.trajectories = []
         self.index = []
         self.rewards_count = 0
         self.done_count = 0
         self.steps_count = 0
         self.p_cont_algo = p_cont_algo
-        self.horizon = horizon
+        self.horizon = terminal_repeats
 
     def append(self, traj_id, state, action, reward, done, info):
         """subclass and override this method to get different buffer write behavior"""
@@ -68,6 +68,12 @@ class Buffer:
                 pcont_np = np.linspace(math.e, 0, len(self.trajectories[traj_id]) - self.horizon)
                 pcont_np = 1.0 - 1.0 / 10.0 ** pcont_np
                 pcont_np = np.concatenate((pcont_np, np.zeros(self.horizon)))
+                for step, pcont in zip(self.trajectories[traj_id], pcont_np):
+                    step.pcont = pcont
+            elif self.p_cont_algo == 'step':
+                start = np.ones(len(self.trajectories[traj_id]) - 5 - self.horizon)
+                dropoff = np.linspace(1, 0, 5)
+                pcont_np = np.concatenate((start, dropoff, np.zeros(self.horizon)))
                 for step, pcont in zip(self.trajectories[traj_id], pcont_np):
                     step.pcont = pcont
 

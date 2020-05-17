@@ -193,12 +193,12 @@ def gather_experience(buff, episode, env, policy, eps=0.0, eps_policy=None, expl
                       delay=0.01):
     with torch.no_grad():
         # gather new experience
-        episode_reward = 0.0
+        episode_reward = []
+        episode_entropy = []
         if seed is not None:
             env.seed(seed)
         state, reward, done = env.reset(), 0.0, False
-        episode_reward += reward
-        episode_entropy = []
+        episode_reward += [reward]
 
         def get_action(state, reward, done):
             t_state = env.connector.policy_prepro(state, args.device).unsqueeze(0)
@@ -228,15 +228,14 @@ def gather_experience(buff, episode, env, policy, eps=0.0, eps_policy=None, expl
 
         while not done:
             state, reward, done, info = env.step(action)
-            episode_reward += reward
+            episode_reward += [reward]
             action, action_dist = get_action(state, reward, done)
             episode_entropy += [action_dist.entropy().mean().item()]
 
     return buff, episode_reward, episode_entropy
 
 
-def gather_seed_episodes(env, seed_episodes):
-    buff = Buffer()
+def gather_seed_episodes(env, buff, seed_episodes):
     for episode in range(seed_episodes):
         gather_experience(buff, episode, env, env.connector.random_policy, render=False)
     return buff
@@ -331,8 +330,11 @@ def main(args):
     args.action_min = -1.0
     args.action_max = 1.0
 
-    train_buff = gather_seed_episodes(env, args.seed_episodes)
-    test_buff = gather_seed_episodes(env, args.seed_episodes)
+    # experience buffers
+    train_buff = Buffer(p_cont_algo=args.pcont_algo, terminal_repeats=args.pcont_terminal_repeats)
+    test_buff = Buffer(p_cont_algo=args.pcont_algo, terminal_repeats=args.pcont_terminal_repeats)
+    train_buff = gather_seed_episodes(env, train_buff, args.seed_episodes)
+    test_buff = gather_seed_episodes(env, test_buff, args.seed_episodes)
     train_episode, test_episode = args.seed_episodes, args.seed_episodes
     dummy_buffer = DummyBuffer()
 
@@ -660,7 +662,7 @@ def main(args):
 
         wandb.log({'reward': reward})
         viz.update_rewards(reward)
-        recent_reward.append(reward)
+        recent_reward.append(sum(reward))
         scr.update_slot('eps', f'exploration_noise: {args.exploration_noise}, forward_slope: {args.forward_slope}')
         rr = ''
         for reward in recent_reward:
@@ -676,7 +678,7 @@ def main(args):
                 dummy_buffer, reward, entropy = gather_experience(dummy_buffer, train_episode, env, policy,
                                                        eps=0.0, eps_policy=env.connector.random_policy,
                                                        expln_noise=0.0, seed=args.seed)
-                sampled_rewards.append(reward)
+                sampled_rewards.append(sum(reward))
             if mean(sampled_rewards) > best_ave_reward:
                 best_ave_reward = mean(sampled_rewards)
                 policy_saver.save(policy, 'best', ave=mean(sampled_rewards), max=max(sampled_rewards),
@@ -747,6 +749,8 @@ if __name__ == '__main__':
         'pcont_lr': 1e-4,
         'pcont_hidden_dims': [48, 48],
         'pcont_nonlin': 'nn.ELU',
+        'pcont_algo': 'invexp',
+        'pcont_terminal_repeats': 3,
 
         'value_lr': 2e-5,
         'value_hidden_dims': [300, 300],

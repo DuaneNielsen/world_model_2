@@ -1,6 +1,7 @@
 import curses
 import random
 from collections import OrderedDict, deque
+from statistics import mean
 
 from matplotlib import pyplot as plt
 from time import sleep
@@ -306,7 +307,6 @@ class HistogramPanel:
         self.hist.set_yscale(yscale)
         self.hist.relim()
         self.hist.autoscale_view()
-        self.fig.canvas.draw()
 
 
 class PlotPanel:
@@ -321,7 +321,6 @@ class PlotPanel:
         self.plot.plot(sequence, label=label)
         self.plot.relim()
         self.plot.autoscale_view()
-        self.fig.canvas.draw()
 
     def reset(self):
         self.plot.clear()
@@ -344,12 +343,10 @@ class LiveLine:
         self.live.plot(y)
         self.live.relim()
         self.live.autoscale_view()
-        self.fig.canvas.draw()
 
     def reset(self):
         self.live.clear()
         self.dq = deque(maxlen=self.rew_live_length)
-        self.fig.canvas.draw()
 
 
 class Viz:
@@ -359,31 +356,39 @@ class Viz:
         if window_title:
             self.fig.canvas.set_window_title(window_title)
         self.args = args
+        self.current_panel = 1
 
         panels = (4, 5)
-        self.rew_plot = LiveLine(self.fig, panels, 1, label='episode reward')
+        self.rew_plot = LiveLine(self.fig, panels, self._next_panel, label='sum reward')
+        self.rew_mean_plot = LiveLine(self.fig, panels, self._next_panel, label='mean reward')
+        self.steps = LiveLine(self.fig, panels, self._next_panel, label='episode length')
 
-        self.dynamics_hist = HistogramPanel(self.fig, panels, 2, label='dynamics')
-        self.rew_hist = HistogramPanel(self.fig, panels, 3, label='reward')
-        self.prew_hist = HistogramPanel(self.fig, panels, 4, label='predicted_reward')
-        self.raw_pcont_hist = HistogramPanel(self.fig, panels, 5, label='measured pcont')
-        self.est_pcont_hist = HistogramPanel(self.fig, panels, 6, label='est pcont')
-        self.value_hist = HistogramPanel(self.fig, panels, 7, label='value')
-        self.sampled_value_hist = HistogramPanel(self.fig, panels, 8, label='sampled value')
+        self.dynamics_hist = HistogramPanel(self.fig, panels, self._next_panel, label='dynamics')
+        self.rew_hist = HistogramPanel(self.fig, panels, self._next_panel, label='reward')
+        self.prew_hist = HistogramPanel(self.fig, panels, self._next_panel, label='predicted_reward')
+        self.raw_pcont_hist = HistogramPanel(self.fig, panels, self._next_panel, label='measured pcont')
+        self.est_pcont_hist = HistogramPanel(self.fig, panels, self._next_panel, label='est pcont')
+        self.value_hist = HistogramPanel(self.fig, panels, self._next_panel, label='value')
+        self.sampled_value_hist = HistogramPanel(self.fig, panels, self._next_panel, label='sampled value')
 
-        self.policy_grad_norm = LiveLine(self.fig, panels, 9, label='policy gradient')
-        self.live_policy_entropy = PlotPanel(self.fig, panels, fig_index=10, label='entropy')
+        self.policy_grad_norm = LiveLine(self.fig, panels, self._next_panel, label='policy gradient')
+        self.live_policy_entropy = PlotPanel(self.fig, panels, fig_index=self._next_panel, label='entropy')
 
-        self.live_value = PlotPanel(self.fig, panels, fig_index=11, label='episode value')
-        self.live_pcont = PlotPanel(self.fig, panels, fig_index=12, label='pcont')
-        self.exp_rew_vs_actual = PlotPanel(self.fig, panels, fig_index=13, label='reward: exp vs actual')
-        self.live_reward = PlotPanel(self.fig, panels, fig_index=14, label='episode reward')
-        self.live_dynamics = PlotPanel(self.fig, panels, fig_index=15, label='episode dynamics prob')
-        self.live_dynamics_entropy = PlotPanel(self.fig, panels, fig_index=16, label='episode dyn ent')
-
+        self.live_value = PlotPanel(self.fig, panels, fig_index=self._next_panel, label='episode value')
+        self.live_pcont = PlotPanel(self.fig, panels, fig_index=self._next_panel, label='pcont')
+        self.exp_rew_vs_actual = PlotPanel(self.fig, panels, fig_index=self._next_panel, label='reward: exp vs actual')
+        self.live_reward = PlotPanel(self.fig, panels, fig_index=self._next_panel, label='episode reward')
+        self.live_dynamics = PlotPanel(self.fig, panels, fig_index=self._next_panel, label='episode dynamics prob')
+        self.live_dynamics_entropy = PlotPanel(self.fig, panels, fig_index=self._next_panel, label='episode dyn ent')
 
         self.fig.canvas.draw()
         self.samples_in_histogram = 500
+
+    @property
+    def _next_panel(self):
+        current_panel = self.current_panel
+        self.current_panel += 1
+        return current_panel
 
     def plot_rewards_histogram(self, b, R):
         with torch.no_grad():
@@ -403,7 +408,11 @@ class Viz:
             self.fig.canvas.draw()
 
     def update_rewards(self, reward):
-        self.rew_plot.update(reward)
+        """ accepts a list of rewards at each step"""
+        self.rew_plot.update(sum(reward))
+        self.rew_mean_plot.update(mean(reward))
+        self.steps.update(len(reward))
+        self.fig.canvas.draw()
 
     def _draw_samples(self, b):
         if len(b.index) < self.samples_in_histogram:
@@ -445,6 +454,7 @@ class Viz:
             self.update_episode_value(value, s)
             self.update_episode_dynamics(T, s, a)
             self.update_policy_entropy(entropy)
+            self.fig.canvas.draw()
 
     def update_episode_reward(self, R, s, r):
         with torch.no_grad():
@@ -490,6 +500,7 @@ class Viz:
                 total_norm += param_norm.item() ** 2
             total_norm = total_norm ** (1. / 2)
             self.policy_grad_norm.update(total_norm)
+            self.fig.canvas.draw()
 
     def update_dynamics(self, b, T, policy):
         with torch.no_grad():
