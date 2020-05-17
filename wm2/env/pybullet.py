@@ -75,7 +75,7 @@ class PybulletWalkerWrapper(gym.Wrapper):
     def step(self, action):
         raw_state, rew, done, info = self.env.step(action)
         target_dist = np.array([self.robot.walk_target_dist], dtype=raw_state.dtype)
-        speed = target_dist - self.prev_target_dist
+        speed = self.prev_target_dist - target_dist
         self.prev_target_dist = target_dist
         done_flag = np.full(1, fill_value=done, dtype=raw_state.dtype)
         state = np.concatenate((raw_state, speed, done_flag), axis=0)
