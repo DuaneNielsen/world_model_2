@@ -165,7 +165,7 @@ class SARDataset(Dataset):
 
     def __getitem__(self, item):
         trajectory = self.b.trajectories[item]
-        state, reward, action, mask, pcont = [], [], [], [], []
+        state, reward, action, done, mask, pcont = [], [], [], [], [], []
         for step in trajectory:
             state += [step.state]
             reward += [step.reward]
@@ -174,14 +174,18 @@ class SARDataset(Dataset):
             # else:
             action += [step.action]
             pcont += [step.pcont]
+            done += [step.done]
 
         astack = np.stack(action)
         pcont = np.stack(pcont)
         pcont = pcont[:, np.newaxis]
+        done = np.stack(done)
+        done = done[:, np.newaxis]
 
         return {'state': np.stack(state),
                 'action': astack,
                 'reward': np.stack(reward),
+                'done': done,
                 'mask': self.mask_f(state, reward, action),
                 'pcont': pcont
                 }

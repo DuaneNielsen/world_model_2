@@ -318,7 +318,7 @@ def main(args):
     imagine_log_cooldown = wm2.utils.Cooldown(secs=30)
     viz_cooldown = wm2.utils.Cooldown(secs=240)
     render_cooldown = wm2.utils.Cooldown(secs=120)
-    episode_refresh = wm2.utils.Cooldown(secs=120)
+    episode_refresh = wm2.utils.Cooldown(secs=60)
 
     # viz
     viz = Viz(args=args, window_title=f'{wandb.run.project} {wandb.run.id}')
@@ -486,20 +486,37 @@ def main(args):
                 #     wandb.log({'reward_test': loss.item()})
 
             def train_pcont():
+
                 """ probability of continuing """
                 train, test = SARDataset(sample_train_buff, mask_f=None), SARDataset(sample_test_buff, mask_f=None)
                 train = DataLoader(train, batch_size=args.batch_size, collate_fn=pad_collate_2, shuffle=True)
                 test = DataLoader(test, batch_size=args.batch_size, collate_fn=pad_collate_2, shuffle=True)
 
+                " regress pcont against the done flag "
                 pcont.train()
                 for trajectories in train:
+                    state = trajectories.state[:-1].to(args.device)
+                    done = trajectories.done[:-1].to(args.device)
+                    next_state = trajectories.state[1:].to(args.device)
+
                     pcont_optim.zero_grad()
-                    predicted_pcont = pcont(trajectories.state.to(args.device))
-                    loss = ((predicted_pcont - trajectories.pcont.to(args.device)) ** 2).mean()
+                    target = (1.0 - done) * pcont(next_state).detach()
+                    pred = pcont(state)
+                    loss = ((target - pred) ** 2).mean()
                     loss.backward()
                     pcont_optim.step()
-                    scr.update_slot('pcont_train', f'pcont train loss  {loss.item()}')
+
                 pcont.eval()
+                #
+                # pcont.train()
+                # for trajectories in train:
+                #     pcont_optim.zero_grad()
+                #     predicted_pcont = pcont(trajectories.state.to(args.device))
+                #     loss = ((predicted_pcont - trajectories.pcont.to(args.device)) ** 2).mean()
+                #     loss.backward()
+                #     pcont_optim.step()
+                #     scr.update_slot('pcont_train', f'pcont train loss  {loss.item()}')
+                # pcont.eval()
 
                 # for trajectories in test:
                 #     predicted_pcont = pcont(trajectories.state.to(args.device))
@@ -735,7 +752,7 @@ if __name__ == '__main__':
     defaults = {
         'env': 'HalfCheetahPyBulletEnv-v0',
         'connector': 'wm2.env.pybullet.PyBulletConnector',
-        'seed_episodes': 400,
+        'seed_episodes': 10,
         'collect_interval': 10,
         'batch_size': 40,
         'device': 'cuda:0',
