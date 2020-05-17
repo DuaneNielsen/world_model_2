@@ -352,13 +352,13 @@ class LiveLine:
 class Viz:
     def __init__(self, args, window_title=None):
         plt.ion()
-        self.fig = plt.figure(num=None, figsize=(18, 12), dpi=80, facecolor='w', edgecolor='k', )
+        self.fig = plt.figure(num=None, figsize=(24, 16), dpi=80, facecolor='w', edgecolor='k', )
         if window_title:
             self.fig.canvas.set_window_title(window_title)
         self.args = args
         self.current_panel = 1
 
-        panels = (4, 5)
+        panels = (5, 8)
         self.rew_plot = LiveLine(self.fig, panels, self._next_panel, label='sum reward')
         self.rew_mean_plot = LiveLine(self.fig, panels, self._next_panel, label='mean reward')
         self.steps = LiveLine(self.fig, panels, self._next_panel, label='episode length')
@@ -377,9 +377,13 @@ class Viz:
         self.live_value = PlotPanel(self.fig, panels, fig_index=self._next_panel, label='episode value')
         self.live_pcont = PlotPanel(self.fig, panels, fig_index=self._next_panel, label='pcont')
         self.exp_rew_vs_actual = PlotPanel(self.fig, panels, fig_index=self._next_panel, label='reward: exp vs actual')
-        self.live_reward = PlotPanel(self.fig, panels, fig_index=self._next_panel, label='episode reward')
-        self.live_dynamics = PlotPanel(self.fig, panels, fig_index=self._next_panel, label='episode dynamics prob')
-        self.live_dynamics_entropy = PlotPanel(self.fig, panels, fig_index=self._next_panel, label='episode dyn ent')
+        self.live_reward = PlotPanel(self.fig, panels, fig_index=self._next_panel, label='epi reward')
+        self.live_dynamics = PlotPanel(self.fig, panels, fig_index=self._next_panel, label='epi dyn prob')
+        self.live_dynamics_entropy = PlotPanel(self.fig, panels, fig_index=self._next_panel, label='epi dyn ent')
+        self.live_dynamics_reward_prob = PlotPanel(self.fig, panels, fig_index=self._next_panel, label='epi dyn reward prob')
+        self.live_dynamics_done_prob = PlotPanel(self.fig, panels, fig_index=self._next_panel, label='epi dyn done prob')
+        self.live_dynamics_contact_prob = PlotPanel(self.fig, panels, fig_index=self._next_panel,
+                                                    label='epi dyn contact prob')
 
         self.fig.canvas.draw()
         self.samples_in_histogram = 500
@@ -441,7 +445,8 @@ class Viz:
         with torch.no_grad():
             self.live_value.reset(), self.live_pcont.reset(), self.exp_rew_vs_actual.reset()
             self.live_reward.reset(), self.live_dynamics.reset(), self.live_policy_entropy.reset()
-            self.live_dynamics_entropy.reset()
+            self.live_dynamics_entropy.reset(), self.live_dynamics_reward_prob.reset()
+            self.live_dynamics_done_prob.reset(), self.live_dynamics_contact_prob.reset()
             s = np.stack(i.state for i in b.trajectories[trajectory_id])
             a = np.stack(i.action for i in b.trajectories[trajectory_id])
             r = np.stack(i.reward for i in b.trajectories[trajectory_id])
@@ -486,11 +491,18 @@ class Viz:
         with torch.no_grad():
             sa = torch.cat((s[:-1], a[:-1]), dim=1)
             dist, hx = T(sa.unsqueeze(1))
-            lp = torch.exp(dist.log_prob(s[1:].unsqueeze((1)))).squeeze().mean(1)
-            lp = lp.squeeze().cpu().numpy()
+            p = torch.exp(dist.log_prob(s[1:].unsqueeze((1)))).squeeze()
+            mean_p = p.mean(1).squeeze().cpu().numpy()
+            done_p = p[:, -1].squeeze().cpu().numpy()
+            reward_p = p[:, -2].squeeze().cpu().numpy()
+            contact_p = p[:, 20:26].mean(1).squeeze().cpu().numpy()
             entropy = dist.entropy().squeeze().mean(1).cpu().numpy()
-            self.live_dynamics.update(lp)
+            self.live_dynamics.update(mean_p)
             self.live_dynamics_entropy.update(entropy)
+            self.live_dynamics_reward_prob.update(reward_p)
+            self.live_dynamics_done_prob.update(done_p)
+            self.live_dynamics_contact_prob.update(contact_p)
+
 
     def sample_grad_norm(self, model, sample=0.01):
         if random.random() < sample:
@@ -520,6 +532,8 @@ class Viz:
             next_s = np.stack([b.trajectories[t][i+1].state for t, i in non_terminals])
             pred_next_dist, hx = T(sa.unsqueeze(0))
             prob_next = pred_next_dist.log_prob(torch.from_numpy(next_s).to(device=self.args.device)).exp()
+
+
             prob_next = prob_next.cpu().detach().numpy()
             prob_next = prob_next.flatten()
             self.dynamics_hist.update(prob_next, bins=100)

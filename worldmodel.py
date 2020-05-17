@@ -663,7 +663,9 @@ def main(args):
         wandb.log({'reward': reward})
         viz.update_rewards(reward)
         recent_reward.append(sum(reward))
-        scr.update_slot('eps', f'exploration_noise: {args.exploration_noise}, forward_slope: {args.forward_slope}')
+        scr.update_slot('eps', f'exploration_noise: {args.exploration_noise} '
+                               f'forward_slope: {args.forward_slope} '
+                               f'pcont_algo {args.pcont_algo} pcont_terminal_repeats {args.pcont_terminal_repeats}')
         rr = ''
         for reward in recent_reward:
             rr += f' {reward:.5f},'
