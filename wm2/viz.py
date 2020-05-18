@@ -376,7 +376,7 @@ class Viz:
 
         self.live_value = PlotPanel(self.fig, panels, fig_index=self._next_panel, label='episode value')
         self.live_pcont = PlotPanel(self.fig, panels, fig_index=self._next_panel, label='pcont')
-        self.exp_rew_vs_actual = PlotPanel(self.fig, panels, fig_index=self._next_panel, label='reward: exp vs actual')
+        self.exp_rew_vs_actual = PlotPanel(self.fig, panels, fig_index=self._next_panel, label='dyn next_step reward')
         self.live_reward = PlotPanel(self.fig, panels, fig_index=self._next_panel, label='epi reward')
         self.live_dynamics = PlotPanel(self.fig, panels, fig_index=self._next_panel, label='epi dyn prob')
         self.live_dynamics_entropy = PlotPanel(self.fig, panels, fig_index=self._next_panel, label='epi dyn ent')
@@ -447,45 +447,45 @@ class Viz:
             self.live_reward.reset(), self.live_dynamics.reset(), self.live_policy_entropy.reset()
             self.live_dynamics_entropy.reset(), self.live_dynamics_reward_prob.reset()
             self.live_dynamics_done_prob.reset(), self.live_dynamics_contact_prob.reset()
+
             s = np.stack(i.state for i in b.trajectories[trajectory_id])
             a = np.stack(i.action for i in b.trajectories[trajectory_id])
             r = np.stack(i.reward for i in b.trajectories[trajectory_id])
             p = np.stack(i.pcont for i in b.trajectories[trajectory_id])
             s = torch.from_numpy(s).to(device=self.args.device)
             a = torch.from_numpy(a).to(device=self.args.device)
-            self.update_episode_reward(R, s, r)
-            self.update_episode_pcont(pcont, s, p)
-            self.update_episode_expected_reward(T, R, s, a, r)
+
+            pc = pcont(s).squeeze().cpu().numpy()
+            sa = torch.cat((s, a), dim=1)
+            pred_next_dist, hx = T(sa.unsqueeze(1))
+            next_state = pred_next_dist.loc.squeeze()
+            pr_next = R(next_state).squeeze().cpu().numpy()
+            pr = R(s).squeeze().cpu().numpy()
+
+            # update pcont
+            self.live_pcont.update(pc)
+            self.live_pcont.update(p)
+
+            # update expected reward
+            self.exp_rew_vs_actual.update(pr)
+            self.exp_rew_vs_actual.update(r)
+            self.exp_rew_vs_actual.update(pr_next * pc)
+
+            # update predicted vs recieved
+            self.live_reward.update(pr, 'predicted')
+            self.live_reward.update(r, 'received')
+            self.live_reward.update(pr * pc)
+
             self.update_episode_value(value, s)
             self.update_episode_dynamics(T, s, a)
             self.update_policy_entropy(entropy)
             self.fig.canvas.draw()
 
-    def update_episode_reward(self, R, s, r):
-        with torch.no_grad():
-            pr = R(s).squeeze().cpu().numpy()
-            self.live_reward.update(pr, 'predicted')
-            self.live_reward.update(r, 'received')
 
     def update_episode_value(self, value, s):
         with torch.no_grad():
             v = value(s).squeeze().cpu().numpy()
             self.live_value.update(v)
-
-    def update_episode_pcont(self, pcont, s, p):
-        with torch.no_grad():
-            pc = pcont(s).squeeze().cpu().numpy()
-            self.live_pcont.update(pc)
-            self.live_pcont.update(p)
-
-    def update_episode_expected_reward(self, T, R, s, a, r):
-        with torch.no_grad():
-            sa = torch.cat((s, a), dim=1)
-            pred_next_dist, hx = T(sa.unsqueeze(1))
-            next_state = pred_next_dist.loc.squeeze()
-            pr = R(next_state).cpu().numpy()
-            self.exp_rew_vs_actual.update(pr)
-            self.exp_rew_vs_actual.update(r)
 
     def update_episode_dynamics(self, T, s, a):
         with torch.no_grad():
