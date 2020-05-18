@@ -387,8 +387,8 @@ def main(args):
             #reward = ((1.5 - torch.log(1.5 - target_dist)) * (1.0 - done_flag)).unsqueeze(0)
             # reward = (1.0 - done_flag)
             #reward = 20 / (1 + torch.exp((target_dist - 0.7) * 10)) * (1.0-done_flag)
-            reward = args.forward_slope * F.relu(speed) + 0.5
-            reward = reward * (1.0 - done_flag)
+            reward = args.forward_slope * F.relu(speed)
+            #reward = reward * (1.0 - done_flag)
             reward = reward.unsqueeze(0)
             reward = torch.transpose(reward, 0, -1)
             return reward
@@ -558,6 +558,7 @@ def main(args):
                     # VR = torch.mean(torch.stack(reward), dim=0)
                     rstack, vstack, pcontstack = torch.stack(reward), torch.stack(v), torch.stack(p_of_continuing)
                     vstack = vstack * pcontstack
+                    rstack = rstack * pcontstack
                     H, L, N, S = rstack.shape
 
                     """ construct matrix in form
