@@ -1,6 +1,6 @@
 from collections import deque
 import collections
-from statistics import mean
+from statistics import mean, stdev
 import random
 import curses
 import argparse
@@ -408,9 +408,11 @@ def main(args):
 
     converged = False
     scr.clear()
-    best_ave_reward = 0
+    best_stats = {'mean': 0}
+    iteration = 0
 
     while not converged:
+        iteration += 1
 
         for c in range(args.collect_interval):
 
@@ -688,21 +690,26 @@ def main(args):
         for reward in recent_reward:
             rr += f' {reward:.5f},'
         scr.update_slot('recent_rewards', 'Recent rewards: ' + rr)
-        scr.update_slot('beat_ave_reward', f'Best ave reward: {best_ave_reward}')
+        scr.update_slot('beat_ave_reward', f'Best {best_stats}')
 
         "check if the policy is worth saving"
-        if reward > best_ave_reward:
+        if reward > best_stats['mean']:
             sampled_rewards = []
 
-            for _ in range(5):
+            for _ in range(args.best_policy_sample_n):
                 dummy_buffer, reward, entropy = gather_experience(dummy_buffer, train_episode, env, policy,
                                                        eps=0.0, eps_policy=env.connector.random_policy,
                                                        expln_noise=0.0, seed=args.seed)
                 sampled_rewards.append(sum(reward))
-            if mean(sampled_rewards) > best_ave_reward:
-                best_ave_reward = mean(sampled_rewards)
-                policy_saver.save(policy, 'best', ave=mean(sampled_rewards), max=max(sampled_rewards),
-                                  explr_noise=args.exploration_noise)
+            if mean(sampled_rewards) > best_stats['mean']:
+                best_stats['mean'] = mean(sampled_rewards)
+                best_stats['stdev'] = stdev(sampled_rewards)
+                best_stats['max'] = max(sampled_rewards)
+                best_stats['min'] = min(sampled_rewards)
+                best_stats['iteration'] = iteration
+                best_stats['samples'] = args.best_policy_sample_n
+
+                policy_saver.save(policy, 'best', **best_stats)
 
         test_buff, reward, entropy = gather_experience(test_buff, test_episode, env, policy,
                                               eps=0.0, eps_policy=env.connector.random_policy,
@@ -748,6 +755,60 @@ def demo(args):
                                                render=True, delay=1.0 / args.fps)
 
 
+def get_args(defaults):
+    parser = argparse.ArgumentParser()
+    for argument, value in defaults.items():
+        if argument == 'seed':
+            parser.add_argument('--' + argument, type=int, required=False, default=None)
+        elif argument == 'config':
+            parser.add_argument('--' + argument, type=str, required=True, default=None)
+        else:
+            parser.add_argument('--' + argument, type=type(value), required=False, default=None)
+    command_line = parser.parse_args()
+    """ 
+    required due to https://github.com/yaml/pyyaml/issues/173
+    pyyaml does not correctly parse scientific notation 
+    """
+    loader = yaml.SafeLoader
+    loader.add_implicit_resolver(
+        u'tag:yaml.org,2002:float',
+        re.compile(u'''^(?:
+         [-+]?(?:[0-9][0-9_]*)\\.[0-9_]*(?:[eE][-+]?[0-9]+)?
+        |[-+]?(?:[0-9][0-9_]*)(?:[eE][-+]?[0-9]+)
+        |\\.[0-9_]+(?:[eE][-+][0-9]+)?
+        |[-+]?[0-9][0-9_]*(?::[0-5]?[0-9])+\\.[0-9_]*
+        |[-+]?\\.(?:inf|Inf|INF)
+        |\\.(?:nan|NaN|NAN))$''', re.X),
+        list(u'-+0123456789.'))
+
+    def flatten(d, parent_key='', sep='_'):
+        items = []
+        for k, v in d.items():
+            new_key = parent_key + sep + k if parent_key else k
+            if isinstance(v, collections.MutableMapping):
+                items.extend(flatten(v, new_key, sep=sep).items())
+            else:
+                items.append((new_key, v))
+        return dict(items)
+
+    yaml_conf = {}
+    if command_line.config is not None:
+        with pathlib.Path(command_line.config).open() as f:
+            yaml_conf = yaml.load(f, Loader=loader)
+            yaml_conf = flatten(yaml_conf)
+    args = {}
+    """ precedence is command line, config file, default """
+    for key, value in vars(command_line).items():
+        if value is not None:
+            args[key] = vars(command_line)[key]
+        elif key in yaml_conf:
+            args[key] = yaml_conf[key]
+        else:
+            args[key] = defaults[key]
+    args = types.SimpleNamespace(**args)
+    return args
+
+
 if __name__ == '__main__':
 
     defaults = {
@@ -760,7 +821,7 @@ if __name__ == '__main__':
         'horizon': 15,
         'discount': 0.99,
         'lam': 0.95,
-        'exploration_noise': 0.2,
+        'exploration_noise': 0.25,
 
         'dynamics_lr': 1e-4,
         'dynamics_layers': 1,
@@ -784,69 +845,16 @@ if __name__ == '__main__':
         'reward_hidden_dims': [300, 300],
         'reward_nonlin': 'nn.ELU',
 
-        'forward_slope': 20,
+        'forward_slope': 28,
 
+        'best_policy_sample_n': 10,
         'demo': 'off',
         'seed': None,
         'fps': 24,
         'config': None
     }
 
-    parser = argparse.ArgumentParser()
-    for argument, value in defaults.items():
-        if argument == 'seed':
-            parser.add_argument('--' + argument, type=int, required=False, default=None)
-        elif argument == 'config':
-            parser.add_argument('--' + argument, type=str, required=True, default=None)
-        else:
-            parser.add_argument('--' + argument, type=type(value), required=False, default=None)
-    command_line = parser.parse_args()
-
-    """ 
-    required due to https://github.com/yaml/pyyaml/issues/173
-    pyyaml does not correctly parse scientific notation 
-    """
-    loader = yaml.SafeLoader
-    loader.add_implicit_resolver(
-        u'tag:yaml.org,2002:float',
-        re.compile(u'''^(?:
-         [-+]?(?:[0-9][0-9_]*)\\.[0-9_]*(?:[eE][-+]?[0-9]+)?
-        |[-+]?(?:[0-9][0-9_]*)(?:[eE][-+]?[0-9]+)
-        |\\.[0-9_]+(?:[eE][-+][0-9]+)?
-        |[-+]?[0-9][0-9_]*(?::[0-5]?[0-9])+\\.[0-9_]*
-        |[-+]?\\.(?:inf|Inf|INF)
-        |\\.(?:nan|NaN|NAN))$''', re.X),
-        list(u'-+0123456789.'))
-
-
-    def flatten(d, parent_key='', sep='_'):
-        items = []
-        for k, v in d.items():
-            new_key = parent_key + sep + k if parent_key else k
-            if isinstance(v, collections.MutableMapping):
-                items.extend(flatten(v, new_key, sep=sep).items())
-            else:
-                items.append((new_key, v))
-        return dict(items)
-
-
-    yaml_conf = {}
-    if command_line.config is not None:
-        with pathlib.Path(command_line.config).open() as f:
-            yaml_conf = yaml.load(f, Loader=loader)
-            yaml_conf = flatten(yaml_conf)
-
-    args = {}
-    """ precedence is command line, config file, default """
-    for key, value in vars(command_line).items():
-        if value is not None:
-            args[key] = vars(command_line)[key]
-        elif key in yaml_conf:
-            args[key] = yaml_conf[key]
-        else:
-            args[key] = defaults[key]
-
-    args = types.SimpleNamespace(**args)
+    args = get_args(defaults)
 
     if args.seed is not None:
         determinism(args.seed)
