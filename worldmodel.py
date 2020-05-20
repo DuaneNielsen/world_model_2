@@ -705,11 +705,13 @@ def main(args):
                 sampled_rewards.append(sum(reward))
             if mean(sampled_rewards) > best_stats['mean']:
                 best_stats['mean'] = mean(sampled_rewards)
-                best_stats['stdev'] = stdev(sampled_rewards)
+                best_stats['std'] = stdev(sampled_rewards)
                 best_stats['max'] = max(sampled_rewards)
                 best_stats['min'] = min(sampled_rewards)
-                best_stats['iteration'] = iteration
-                best_stats['samples'] = args.best_policy_sample_n
+                best_stats['itr'] = iteration
+                best_stats['n'] = args.best_policy_sample_n
+                best_stats['expl'] = args.exploration_noise
+                best_stats['fw_s'] = args.forward_slope
 
                 policy_saver.save(policy, 'best', **best_stats)
 
