@@ -37,6 +37,8 @@ from wm2.data.utils import pad_collate_2
 import wm2.utils
 import wm2.env.wrappers
 from wm2.env.pybullet import PyBulletConnector
+import pybullet
+
 
 class MLP(nn.Module):
     def __init__(self, layers, nonlin=None, dropout=0.2):
@@ -725,9 +727,7 @@ def main(args):
         converged = False
 
 
-def demo(args):
-    env = make_env()
-    env.render()
+def demo(dir, env, n=100):
 
     args.state_dims = env.observation_space.shape[0]
     args.action_dims = env.action_space.shape[0]
@@ -740,10 +740,10 @@ def demo(args):
     policy = Policy(layers=[args.state_dims, *args.policy_hidden_dims, args.action_dims], min=args.action_min,
                     max=args.action_max).to(args.device)
 
-    wandb_run_dir = str(next(pathlib.Path().glob(f'wandb/*{args.demo}')))
+    iterations = 0
 
-    while True:
-        load_dict = wm2.utils.SaveLoad.load(wandb_run_dir, 'policy', 'best')
+    while iterations < n:
+        load_dict = wm2.utils.SaveLoad.load(dir, 'policy', 'best')
         msg = ''
         for arg, value in load_dict.items():
             if arg != 'model':
@@ -753,6 +753,7 @@ def demo(args):
         train_buff, reward, entropy = gather_experience(dummy_buffer, 0, env, policy,
                                                eps=0.0, eps_policy=env.connector.random_policy,
                                                render=True, delay=1.0 / args.fps)
+        iterations += 1
 
 
 def get_args(defaults):
@@ -809,50 +810,50 @@ def get_args(defaults):
     return args
 
 
+defaults = {
+    'env': 'HalfCheetahPyBulletEnv-v0',
+    'connector': 'wm2.env.pybullet.PyBulletConnector',
+    'seed_episodes': 10,
+    'collect_interval': 10,
+    'batch_size': 40,
+    'device': 'cuda:0',
+    'horizon': 15,
+    'discount': 0.99,
+    'lam': 0.95,
+    'exploration_noise': 0.25,
+
+    'dynamics_lr': 1e-4,
+    'dynamics_layers': 1,
+    'dynamics_hidden_dim': 300,
+
+    'pcont_lr': 1e-4,
+    'pcont_hidden_dims': [48, 48],
+    'pcont_nonlin': 'nn.ELU',
+    'pcont_algo': 'invexp',
+    'pcont_terminal_repeats': 3,
+
+    'value_lr': 2e-5,
+    'value_hidden_dims': [300, 300],
+    'value_nonlin': 'nn.ELU',
+
+    'policy_lr': 2e-5,
+    'policy_hidden_dims': [48, 48],
+    'policy_nonlin': 'nn.ELU',
+
+    'reward_lr': 1e-4,
+    'reward_hidden_dims': [300, 300],
+    'reward_nonlin': 'nn.ELU',
+
+    'forward_slope': 28,
+
+    'best_policy_sample_n': 10,
+    'demo': 'off',
+    'seed': None,
+    'fps': 24,
+    'config': None
+}
+
 if __name__ == '__main__':
-
-    defaults = {
-        'env': 'HalfCheetahPyBulletEnv-v0',
-        'connector': 'wm2.env.pybullet.PyBulletConnector',
-        'seed_episodes': 10,
-        'collect_interval': 10,
-        'batch_size': 40,
-        'device': 'cuda:0',
-        'horizon': 15,
-        'discount': 0.99,
-        'lam': 0.95,
-        'exploration_noise': 0.25,
-
-        'dynamics_lr': 1e-4,
-        'dynamics_layers': 1,
-        'dynamics_hidden_dim': 300,
-
-        'pcont_lr': 1e-4,
-        'pcont_hidden_dims': [48, 48],
-        'pcont_nonlin': 'nn.ELU',
-        'pcont_algo': 'invexp',
-        'pcont_terminal_repeats': 3,
-
-        'value_lr': 2e-5,
-        'value_hidden_dims': [300, 300],
-        'value_nonlin': 'nn.ELU',
-
-        'policy_lr': 2e-5,
-        'policy_hidden_dims': [48, 48],
-        'policy_nonlin': 'nn.ELU',
-
-        'reward_lr': 1e-4,
-        'reward_hidden_dims': [300, 300],
-        'reward_nonlin': 'nn.ELU',
-
-        'forward_slope': 28,
-
-        'best_policy_sample_n': 10,
-        'demo': 'off',
-        'seed': None,
-        'fps': 24,
-        'config': None
-    }
 
     args = get_args(defaults)
 
@@ -866,4 +867,7 @@ if __name__ == '__main__':
             wandb.init(config=vars(args))
             curses.wrapper(main(args))
         else:
-            demo(args)
+            wandb_run_dir = str(next(pathlib.Path().glob(f'wandb/*{args.demo}')))
+            env = make_env()
+            env.render()
+            demo(wandb_run_dir, env)
