@@ -53,7 +53,7 @@ if __name__ == '__main__':
 
     menu = DuaneCursesMenu()
 
-    for dir in wandb_run_dirs[:20]:
+    for dir in wandb_run_dirs[:30]:
         policy_file = dir/'policy_best.pt'
         if policy_file.exists():
             file = torch.load(str(policy_file))
