@@ -7,6 +7,7 @@ from worldmodel import get_args, demo, defaults, make_env
 import worldmodel
 import curses
 import shutil
+import time
 
 KEY_DELETE = 330
 
@@ -64,4 +65,5 @@ if __name__ == '__main__':
             f = FunctionItem(stats, demo, kwargs={'dir': str(dir), 'env': env, 'n': 5})
             menu.append_item(f)
 
-    menu.show()
+    menu.start()
+    menu.join()
