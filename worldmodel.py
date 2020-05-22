@@ -390,9 +390,8 @@ def main(args):
             #reward = ((1.5 - torch.log(1.5 - target_dist)) * (1.0 - done_flag)).unsqueeze(0)
             # reward = (1.0 - done_flag)
             #reward = 20 / (1 + torch.exp((target_dist - 0.7) * 10)) * (1.0-done_flag)
-            speed = F.relu(speed) * args.forward_slope
-            position = (1.0 - target_dist) * args.forward_slope
-            reward = speed + position + 0.3
+            reward = F.leaky_relu(speed) * args.forward_slope
+            #position = (1.0 - target_dist) * args.forward_slope
             #reward = reward * (1.0 - done_flag)
             reward = reward.unsqueeze(0)
             reward = torch.transpose(reward, 0, -1)

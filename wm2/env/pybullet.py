@@ -87,8 +87,8 @@ class PybulletWalkerWrapper(gym.Wrapper):
         #rew = (1.5 - np.log(1.5 - target_dist)) * (1-done_flag)
         # rew = 20/(1+np.exp((target_dist - 0.7)*10)) * (1.0-done_flag)
 
-        speed = speed if speed > 0.0 else 0.0
-        target_dist = 1.0 if target_dist > 1.0 else target_dist
-        rew = (speed + (1.0 - target_dist)) * self.args.forward_slope
+        speed = speed if speed > 0.0 else speed * 1e-2
+        #target_dist = 1.0 if target_dist > 1.0 else target_dist
+        rew = speed * self.args.forward_slope
         rew = rew * (1.0 - done_flag)
         return state, rew.item(), done, info
