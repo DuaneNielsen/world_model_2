@@ -222,7 +222,7 @@ def gather_experience(buff, episode, env, policy, eps=0.0, eps_policy=None, expl
             if render:
                 env.render()
                 time.sleep(delay)
-                # print(reward, state[-2], state[-9:-3])
+                #print(reward, state[-2], state[-3])
             return action, action_dist
 
         action, action_dist = get_action(state, reward, done)
@@ -258,7 +258,7 @@ def log_prob_loss(trajectories, predicted_state):
     posterior = Normal(predicted_state.loc[1:], predicted_state.scale[1:])
     div = kl_divergence(prior, posterior).mean()
     log_p = predicted_state.log_prob(trajectories.next_state.to(args.device)).mean()
-    return div * 1.0 - log_p
+    return div * args.dynamics_reg - log_p
 
 
 def log_prob_loss_entropy(trajectories, predicted_state):
@@ -365,7 +365,7 @@ def main(args):
     #                     layers=args.transition_layers).to(args.device)
 
     T_optim = Adam(T.parameters(), lr=args.dynamics_lr)
-    t_criterion = log_prob_loss_simple
+    t_criterion = log_prob_loss
 
     # reward model
     # R = HandcraftedPrior(args.state_dims, args.reward_hidden_dims, nonlin=args.nonlin).to(args.device)
@@ -373,15 +373,16 @@ def main(args):
     # R = MLP([args.state_dims, *args.reward_hidden_dims, 1], nonlin=args.reward_nonlin).to(args.device)
     # R = nn.Linear(state_dims, 1)
     # R_optim = Adam(R.parameters(), lr=args.reward_lr)
+
     class DiffReward(nn.Module):
         def __init__(self):
             super().__init__()
-            pass
 
         def forward(self, state):
             state = torch.transpose(state, 0, -1)
             done_flag = state[-1]
-            speed = state[-2]
+            target_dist = state[-2]
+            speed = state[-3]
             #target_dist = target_dist.clamp(max=0.999, min=0.0)
             #reward = (1.0 - done_flag + (0.95 ** (target_dist * 1000.0 / 20.0)) * (1.0 - done_flag)).unsqueeze(0)
             # reward = (1.0 - state[-1]) / ((1.0 - state[-2]).sqrt() + torch.finfo(state).eps)
@@ -389,13 +390,15 @@ def main(args):
             #reward = ((1.5 - torch.log(1.5 - target_dist)) * (1.0 - done_flag)).unsqueeze(0)
             # reward = (1.0 - done_flag)
             #reward = 20 / (1 + torch.exp((target_dist - 0.7) * 10)) * (1.0-done_flag)
-            reward = args.forward_slope * F.relu(speed)
+            speed = F.relu(speed) * args.forward_slope
+            position = (1.0 - target_dist) * args.forward_slope
+            reward = speed + position + 0.3
             #reward = reward * (1.0 - done_flag)
             reward = reward.unsqueeze(0)
             reward = torch.transpose(reward, 0, -1)
             return reward
 
-    R = DiffReward()
+    R = DiffReward().to(args.device)
 
     """ probability of continuing """
     pcont = SoftplusMLP([args.state_dims, *args.pcont_hidden_dims, 1]).to(args.device)
@@ -590,6 +593,8 @@ def main(args):
 
                     # occasionally dump table to screen for analysis
                     if update_text:
+                        prob_cont = pcontstack[:, 0, 0, 0].detach().cpu().numpy()
+                        scr.update_table('pcont', prob_cont)
                         rewards = rstack[-1:, :, 0, 0, 0].detach().cpu().numpy()
                         scr.update_table('rewards', rewards)
                         v = vstack[:, 0, 0, 0].unsqueeze(0).detach().cpu().numpy()
@@ -827,6 +832,7 @@ defaults = {
     'dynamics_lr': 1e-4,
     'dynamics_layers': 1,
     'dynamics_hidden_dim': 300,
+    'dynamics_reg': 0.5,
 
     'pcont_lr': 1e-4,
     'pcont_hidden_dims': [48, 48],

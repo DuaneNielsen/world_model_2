@@ -58,8 +58,8 @@ class PyBulletConnector:
 class PybulletWalkerWrapper(gym.Wrapper):
     def __init__(self, env, args):
         super().__init__(env)
-        low = np.concatenate((self.unwrapped.observation_space.low, np.array([-np.inf, 0])))
-        high = np.concatenate((self.unwrapped.observation_space.high, np.array([+np.inf, 1])))
+        low = np.concatenate((self.unwrapped.observation_space.low, np.array([-np.inf, -np.inf, 0])))
+        high = np.concatenate((self.unwrapped.observation_space.high, np.array([+np.inf, np.inf, 1])))
         self.observation_space = gym.spaces.Box(low=low, high=high, dtype=np.float32)
         self.robot = env.unwrapped.robot
         self.prev_target_dist = None
@@ -67,18 +67,19 @@ class PybulletWalkerWrapper(gym.Wrapper):
 
     def reset(self):
         state = self.env.reset()
-        self.prev_target_dist = np.array([self.robot.walk_target_dist], dtype=state.dtype)
+        self.prev_target_dist = np.array([self.robot.walk_target_dist], dtype=state.dtype) / 1000.0
         forward_speed = np.array([0.0], dtype=state.dtype)
+        target_dist = np.array([self.robot.walk_target_dist], dtype=state.dtype) / 1000.0
         done_flag = np.full(1, fill_value=0, dtype=state.dtype)
-        return np.concatenate((state, forward_speed, done_flag), axis=0)
+        return np.concatenate((state, forward_speed, target_dist, done_flag), axis=0)
 
     def step(self, action):
         raw_state, rew, done, info = self.env.step(action)
-        target_dist = np.array([self.robot.walk_target_dist], dtype=raw_state.dtype)
+        target_dist = np.array([self.robot.walk_target_dist], dtype=raw_state.dtype) / 1000.0
         speed = self.prev_target_dist - target_dist
         self.prev_target_dist = target_dist
         done_flag = np.full(1, fill_value=done, dtype=raw_state.dtype)
-        state = np.concatenate((raw_state, speed, done_flag), axis=0)
+        state = np.concatenate((raw_state, speed, target_dist, done_flag), axis=0)
         # if done:
         #     rew = 0.0
         # else:
@@ -87,6 +88,7 @@ class PybulletWalkerWrapper(gym.Wrapper):
         # rew = 20/(1+np.exp((target_dist - 0.7)*10)) * (1.0-done_flag)
 
         speed = speed if speed > 0.0 else 0.0
-        rew = speed * self.args.forward_slope
+        target_dist = 1.0 if target_dist > 1.0 else target_dist
+        rew = (speed + (1.0 - target_dist)) * self.args.forward_slope
         rew = rew * (1.0 - done_flag)
         return state, rew.item(), done, info
