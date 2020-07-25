@@ -1,43 +1,41 @@
 import torch
-import torch.distributions as dist
-from wm2.distributions import ScaledTanhTransformedGaussian
+
+from env.connector import EnvConnector
 import numpy as np
 import gym
-import math
+import torch.nn as nn
+import torch.nn.functional as F
 
 
-class PyBulletConnector:
-    def __init__(self, action_dims):
-        self.action_dims = action_dims
+class DiffReward(nn.Module):
+    def __init__(self, args):
+        super().__init__()
+        self.args = args
 
-    @staticmethod
-    def policy_prepro(state, device):
-        return torch.tensor(state).float().to(device)
-
-    @staticmethod
-    def buffer_prepro(state):
-        return state.astype(np.float32)
-
-    @staticmethod
-    def reward_prepro(reward):
-        return np.array([reward], dtype=np.float32)
-
-    @staticmethod
-    def action_prepro(action):
-        if action.shape[1] == 1:
-            return action.detach().cpu().squeeze().unsqueeze(0).numpy().astype(np.float32)
-        else:
-            return action.detach().cpu().squeeze().numpy().astype(np.float32)
-
-    def random_policy(self, state):
-        mu = torch.zeros((1, self.action_dims,))
-        scale = torch.full((1, self.action_dims,), 0.5)
-        return ScaledTanhTransformedGaussian(mu, scale)
+    def forward(self, state):
+        state = torch.transpose(state, 0, -1)
+        done_flag = state[-1]
+        target_dist = state[-2]
+        speed = state[-3]
+        # target_dist = target_dist.clamp(max=0.999, min=0.0)
+        # reward = (1.0 - done_flag + (0.95 ** (target_dist * 1000.0 / 20.0)) * (1.0 - done_flag)).unsqueeze(0)
+        # reward = (1.0 - state[-1]) / ((1.0 - state[-2]).sqrt() + torch.finfo(state).eps)
+        eps = torch.finfo(speed.dtype).eps
+        # reward = ((1.5 - torch.log(1.5 - target_dist)) * (1.0 - done_flag)).unsqueeze(0)
+        # reward = (1.0 - done_flag)
+        # reward = 20 / (1 + torch.exp((target_dist - 0.7) * 10)) * (1.0-done_flag)
+        reward = F.leaky_relu(speed) * self.args.forward_slope
+        # position = (1.0 - target_dist) * args.forward_slope
+        # reward = reward * (1.0 - done_flag)
+        reward = reward.unsqueeze(0)
+        reward = torch.transpose(reward, 0, -1)
+        return reward
 
 
-    def uniform_random_policy(self, state):
-        mu = torch.ones((state.size(0), self.action_dims,))
-        return dist.Uniform(-mu, mu)
+class PyBulletConnector(EnvConnector):
+
+    def make_reward_model(self, args):
+        return DiffReward(args)
 
     @staticmethod
     def reward_mask_f(state, reward, action):

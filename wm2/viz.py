@@ -455,10 +455,12 @@ class Viz:
             s = torch.from_numpy(s).to(device=self.args.device)
             a = torch.from_numpy(a).to(device=self.args.device)
 
+            N, S = s.size()
+
             pc = pcont(s).squeeze().cpu().numpy()
             sa = torch.cat((s, a), dim=1)
             pred_next_dist, hx = T(sa.unsqueeze(1))
-            next_state = pred_next_dist.loc.squeeze()
+            next_state = pred_next_dist.loc.reshape(N, S)
             pr_next = R(next_state).squeeze().cpu().numpy()
             pr = R(s).squeeze().cpu().numpy()
 
@@ -491,17 +493,18 @@ class Viz:
         with torch.no_grad():
             sa = torch.cat((s[:-1], a[:-1]), dim=1)
             dist, hx = T(sa.unsqueeze(1))
-            p = torch.exp(dist.log_prob(s[1:].unsqueeze((1)))).squeeze()
+            N, S = s.size()
+            p = torch.exp(dist.log_prob(s[1:].unsqueeze((1)))).reshape(N-1, S)
             mean_p = p.mean(1).squeeze().cpu().numpy()
-            done_p = p[:, -1].squeeze().cpu().numpy()
-            reward_p = p[:, -2].squeeze().cpu().numpy()
-            contact_p = p[:, 20:26].mean(1).squeeze().cpu().numpy()
-            entropy = dist.entropy().squeeze().mean(1).cpu().numpy()
+            #done_p = p[:, -1].squeeze().cpu().numpy()
+            #reward_p = p[:, -2].squeeze().cpu().numpy()
+            #contact_p = p[:, 20:26].mean(1).squeeze().cpu().numpy()
+            entropy = dist.entropy().mean(1).squeeze().cpu().numpy()
             self.live_dynamics.update(mean_p)
             self.live_dynamics_entropy.update(entropy)
-            self.live_dynamics_reward_prob.update(reward_p)
-            self.live_dynamics_done_prob.update(done_p)
-            self.live_dynamics_contact_prob.update(contact_p)
+            #self.live_dynamics_reward_prob.update(reward_p)
+            #self.live_dynamics_done_prob.update(done_p)
+            #self.live_dynamics_contact_prob.update(contact_p)
 
 
     def sample_grad_norm(self, model, sample=0.01):

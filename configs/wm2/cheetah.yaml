@@ -1,5 +1,5 @@
 env: 'HalfCheetahPyBulletEnv-v1'
-connector: 'wm2.env.pybullet.PyBulletConnector'
+connector: 'wm2.env.pybullet:PyBulletConnector'
 seed_episodes: 5
 collect_interval: 10
 batch_size: 40
@@ -9,6 +9,7 @@ lam: 0.95
 exploration_noise: 0.25
 
 dynamics:
+  learnable: True
   lr: 1e-3
   layers: 1
   hidden_dim: 48
@@ -24,6 +25,7 @@ policy:
   nonlin: 'nn.ELU'
 
 reward:
+  learnable: False
   lr: 1e-3
   hidden_dims: [300, 300]
   nonlin: 'nn.ELU'

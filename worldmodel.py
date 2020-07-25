@@ -9,13 +9,13 @@ import pathlib
 import yaml
 import re
 import types
+import importlib
 
 import torch
 import torch.nn as nn
 from torch.optim import Adam
 from torch.utils.data import DataLoader, ConcatDataset
-from torch.distributions import Normal, Categorical
-from torch.distributions.mixture_same_family import MixtureSameFamily
+from torch.distributions import Normal
 from torch.distributions.kl import kl_divergence
 import torch.nn.functional as F
 import torch.backends.cudnn
@@ -25,10 +25,9 @@ import warnings
 import wandb
 import gym
 import gym.wrappers
-import pybulletgym
 
+from models.models import MLP, SoftplusMLP, Policy, StochasticTransitionModel
 from wm2.viz import Viz
-from wm2.distributions import ScaledTanhTransformedGaussian
 from wm2.viz import Curses
 from wm2.data.datasets import Buffer, SARDataset, SARNextDataset, SimpleRewardDataset, DummyBuffer, \
     SubsetSequenceBuffer
@@ -36,159 +35,6 @@ from wm2.utils import Pbar
 from wm2.data.utils import pad_collate_2
 import wm2.utils
 import wm2.env.wrappers
-from wm2.env.pybullet import PyBulletConnector
-import pybullet
-
-
-class MLP(nn.Module):
-    def __init__(self, layers, nonlin=None, dropout=0.2):
-        super().__init__()
-        in_dims = layers[0]
-        net = []
-        # the use of eval here is a security bug
-        nonlin = nn.ELU if nonlin is None else eval(nonlin)
-        for hidden in layers[1:-1]:
-            net += [nn.Linear(in_dims, hidden)]
-            net += [nn.Dropout(dropout)]
-            net += [nonlin()]
-            in_dims = hidden
-        net += [nn.Linear(in_dims, layers[-1], bias=False)]
-        net += [nn.Dropout(dropout)]
-
-        self.mlp = nn.Sequential(*net)
-
-    def forward(self, inp):
-        return self.mlp(inp)
-
-
-class Mixture(nn.Module):
-    def __init__(self, state_dims, hidden_dims, n_gaussians=12, nonlin=None):
-        super().__init__()
-        self.hidden_net = MLP([state_dims, *hidden_dims], nonlin)
-        n_hidden = hidden_dims[-1]
-        self.z_pi = nn.Linear(n_hidden, n_gaussians)
-        self.z_mu = nn.Linear(n_hidden, n_gaussians)
-        self.z_sigma = nn.Linear(n_hidden, n_gaussians)
-
-    def forward(self, inp):
-        last_dim = len(inp.shape) - 1
-        hidden = torch.tanh(self.hidden_net(inp))
-        pi = torch.softmax(self.z_pi(hidden), dim=last_dim)
-        mu = self.z_mu(hidden)
-        sigma = torch.exp(self.z_sigma(hidden))
-        mix = Categorical(probs=pi)
-        comp = Normal(mu, sigma)
-        gmm = MixtureSameFamily(mix, comp)
-        return gmm
-
-
-class SoftplusMLP(nn.Module):
-    def __init__(self, layers, nonlin=None):
-        super().__init__()
-        self.mlp = MLP(layers, nonlin)
-
-    def forward(self, input):
-        return F.softplus(self.mlp(input))
-
-
-class Policy(nn.Module):
-    def __init__(self, layers, min=-1.0, max=1.0, nonlin=None):
-        super().__init__()
-        self.mu = MLP(layers, nonlin, dropout=0.0)
-        self.scale = nn.Linear(layers[0], 1, bias=False)
-        self.min = min
-        self.max = max
-
-    def forward(self, state):
-        mu = self.mu(state)
-        scale = torch.sigmoid(self.scale(state)) + 0.1
-        return ScaledTanhTransformedGaussian(mu, scale, min=self.min, max=self.max)
-
-
-class TransitionModel(nn.Module):
-    def __init__(self, input_dim, hidden_dim, output_dim, layers=1, dropout=0.2):
-        super().__init__()
-        self.dropout = dropout
-        self.lstm = nn.LSTM(input_dim, hidden_dim, layers, dropout=dropout)
-        self.outnet = nn.Sequential(nn.Linear(hidden_dim, output_dim, bias=False),
-                                    nn.Dropout(dropout))
-
-    def dropout_off(self):
-        self._force_dropout(0)
-
-    def dropout_on(self):
-        self._force_dropout(self.dropout)
-
-    def _force_dropout(self, dropout):
-        for name, module in self.named_modules():
-            if isinstance(module, nn.Dropout):
-                module.p = dropout
-
-            elif isinstance(module, nn.LSTM):
-                module.dropout = dropout
-
-            elif isinstance(module, nn.GRU):
-                module.dropout = dropout
-
-    def forward(self, inp, hx=None):
-        output, hx = self.lstm(inp, hx)
-        output = self.outnet(output)
-        return output, hx
-
-
-class StochasticTransitionModel(nn.Module):
-    def __init__(self, input_dim, hidden_dim, output_dim, layers=1, dropout=0.0):
-        super().__init__()
-        self.dropout = dropout
-        self.lstm = nn.LSTM(input_dim, hidden_dim * 2, layers, dropout=dropout)
-        self.mu = nn.Sequential(nn.Linear(hidden_dim, output_dim), nn.Dropout(dropout))
-        self.sig = nn.Sequential(nn.Linear(hidden_dim, output_dim), nn.Dropout(dropout), nn.Sigmoid())
-
-    def forward(self, inp, hx=None):
-        hidden, hx = self.lstm(inp, hx)
-        mu, sig = hidden.chunk(2, dim=2)
-        mu, sig = self.mu(mu), self.sig(sig) + 0.1
-        output_dist = Normal(mu, sig)
-        return output_dist, hx
-
-    def dropout_off(self):
-        self._force_dropout(0)
-
-    def dropout_on(self):
-        self._force_dropout(self.dropout)
-
-    def _force_dropout(self, dropout):
-        for name, module in self.named_modules():
-            if isinstance(module, nn.Dropout):
-                module.p = dropout
-
-            elif isinstance(module, nn.LSTM):
-                module.dropout = dropout
-
-            elif isinstance(module, nn.GRU):
-                module.dropout = dropout
-
-
-class GRU(nn.Module):
-    def __init__(self, input_dim, hidden_dim, output_dim, layers=1, dropout=0.0):
-        super().__init__()
-        self.dropout = dropout
-        self.enc = nn.Sequential(nn.Linear(input_dim, hidden_dim), nn.Dropout(dropout), nn.ELU())
-        self.cell = nn.GRUCell(hidden_dim, hidden_dim * 2)
-        self.mu = nn.Sequential(nn.Linear(hidden_dim, output_dim), nn.Dropout(dropout), nn.ELU())
-        self.sig = nn.Sequential(nn.Linear(hidden_dim, output_dim), nn.Dropout(dropout), nn.Softplus())
-
-    def forward(self, input, hx=None):
-        output = []
-
-        for step in input:
-            step = self.enc(step)
-            hx = self.cell(step, hx)
-            output.append(hx)
-        hidden = torch.stack(output)
-        mu, sig = hidden.chunk(2, dim=2)
-        mu, sig = self.mu(mu), self.sig(sig) + 0.1
-        return Normal(mu, sig), hidden
 
 
 def gather_experience(buff, episode, env, policy, eps=0.0, eps_policy=None, expln_noise=0.0, render=True, seed=None,
@@ -276,8 +122,13 @@ def make_env():
     #env = wm2.env.wrappers.ConcatPrev(env)
     #env = wm2.env.wrappers.AddDoneToState(env)
     #env = wm2.env.wrappers.RewardOneIfNotDone(env)
-    env = wm2.env.pybullet.PybulletWalkerWrapper(env, args)
+    #env = wm2.env.pybullet.PybulletWalkerWrapper(env, args)
     env.render()
+
+    args.state_dims = env.observation_space.shape[0]
+    args.action_dims = env.action_space.shape[0]
+    args.action_min = -1.0
+    args.action_max = 1.0
 
     # def normalize_reward(reward):
     #     return reward / 100.0
@@ -295,8 +146,10 @@ def make_env():
 
     #env = gym.wrappers.TransformReward(env, alwaysone)
 
-    connector = eval(args.connector)
-    env.connector = connector(env.action_space.shape[0])
+    module_name, connector_class_name = args.connector.split(':')
+    connector_module = importlib.import_module(module_name)
+    connector = getattr(connector_module, connector_class_name)
+    env.connector = connector(**vars(args))
     # env.connector = LunarLanderConnector
     return env
 
@@ -327,11 +180,6 @@ def main(args):
 
     env = make_env()
 
-    args.state_dims = env.observation_space.shape[0]
-    args.action_dims = env.action_space.shape[0]
-    args.action_min = -1.0
-    args.action_max = 1.0
-
     # experience buffers
     train_buff = Buffer(p_cont_algo=args.pcont_algo, terminal_repeats=args.pcont_terminal_repeats)
     test_buff = Buffer(p_cont_algo=args.pcont_algo, terminal_repeats=args.pcont_terminal_repeats)
@@ -357,14 +205,13 @@ def main(args):
     # T = TransitionModel(input_dim=args.state_dims + args.action_dims,
     #                     hidden_dim=args.transition_hidden_dim, output_dim=args.state_dims,
     #                     layers=args.transition_layers).to(args.device)
-    T = StochasticTransitionModel(input_dim=args.state_dims + args.action_dims,
-                                  hidden_dim=args.dynamics_hidden_dim, output_dim=args.state_dims,
-                                  layers=args.dynamics_layers).to(args.device)
     # T = GRU(input_dim=args.state_dims + args.action_dims,
     #                     hidden_dim=args.transition_hidden_dim, output_dim=args.state_dims,
     #                     layers=args.transition_layers).to(args.device)
 
-    T_optim = Adam(T.parameters(), lr=args.dynamics_lr)
+    T = env.connector.make_transition_model(args).to(args.device)
+    if args.dynamics_learnable:
+        T_optim = Adam(T.parameters(), lr=args.dynamics_lr)
     t_criterion = log_prob_loss
 
     # reward model
@@ -372,35 +219,13 @@ def main(args):
     # R = Mixture(args.state_dims, args.reward_hidden_dims, nonlin=args.nonlin).to(args.device)
     # R = MLP([args.state_dims, *args.reward_hidden_dims, 1], nonlin=args.reward_nonlin).to(args.device)
     # R = nn.Linear(state_dims, 1)
-    # R_optim = Adam(R.parameters(), lr=args.reward_lr)
 
-    class DiffReward(nn.Module):
-        def __init__(self):
-            super().__init__()
-
-        def forward(self, state):
-            state = torch.transpose(state, 0, -1)
-            done_flag = state[-1]
-            target_dist = state[-2]
-            speed = state[-3]
-            #target_dist = target_dist.clamp(max=0.999, min=0.0)
-            #reward = (1.0 - done_flag + (0.95 ** (target_dist * 1000.0 / 20.0)) * (1.0 - done_flag)).unsqueeze(0)
-            # reward = (1.0 - state[-1]) / ((1.0 - state[-2]).sqrt() + torch.finfo(state).eps)
-            eps = torch.finfo(speed.dtype).eps
-            #reward = ((1.5 - torch.log(1.5 - target_dist)) * (1.0 - done_flag)).unsqueeze(0)
-            # reward = (1.0 - done_flag)
-            #reward = 20 / (1 + torch.exp((target_dist - 0.7) * 10)) * (1.0-done_flag)
-            reward = F.leaky_relu(speed) * args.forward_slope
-            #position = (1.0 - target_dist) * args.forward_slope
-            #reward = reward * (1.0 - done_flag)
-            reward = reward.unsqueeze(0)
-            reward = torch.transpose(reward, 0, -1)
-            return reward
-
-    R = DiffReward().to(args.device)
+    R = env.connector.make_reward_model(args).to(args.device)
+    if args.reward_learnable:
+        R_optim = Adam(R.parameters(), lr=args.reward_lr)
 
     """ probability of continuing """
-    pcont = SoftplusMLP([args.state_dims, *args.pcont_hidden_dims, 1]).to(args.device)
+    pcont = env.connector.make_pcont_model(args).to(args.device)
     pcont_optim = Adam(pcont.parameters(), lr=args.pcont_lr)
 
     "save and restore helpers"
@@ -471,25 +296,25 @@ def main(args):
                 train = DataLoader(train, batch_size=args.batch_size * 50, shuffle=True)
                 test = DataLoader(test, batch_size=args.batch_size * 50, shuffle=True)
 
-                # R.train()
-                #
-                # for state, reward in train:
-                #     R_optim.zero_grad()
-                #     predicted_reward = R(state.to(args.device))
-                #     loss = ((reward.to(args.device) - predicted_reward) ** 2).mean()
-                #     loss.backward()
-                #     R_optim.step()
-                #     scr.update_slot('reward_train', f'Reward train loss {loss.item()}')
-                #     wandb.log({'reward_train': loss.item()})
-                #     R_saver.checkpoint(R, R_optim)
-                #
-                # R.eval()
+                R.train()
 
-                # for state, reward in test:
-                #     predicted_reward = R(state.to(args.device))
-                #     loss = ((reward.to(args.device) - predicted_reward) ** 2).mean()
-                #     scr.update_slot('reward_test', f'Reward test loss  {loss.item()}')
-                #     wandb.log({'reward_test': loss.item()})
+                for state, reward in train:
+                    R_optim.zero_grad()
+                    predicted_reward = R(state.to(args.device))
+                    loss = ((reward.to(args.device) - predicted_reward) ** 2).mean()
+                    loss.backward()
+                    R_optim.step()
+                    scr.update_slot('reward_train', f'Reward train loss {loss.item()}')
+                    wandb.log({'reward_train': loss.item()})
+                    R_saver.checkpoint(R, R_optim)
+
+                R.eval()
+
+                for state, reward in test:
+                    predicted_reward = R(state.to(args.device))
+                    loss = ((reward.to(args.device) - predicted_reward) ** 2).mean()
+                    scr.update_slot('reward_test', f'Reward test loss  {loss.item()}')
+                    wandb.log({'reward_test': loss.item()})
 
             def train_pcont():
 
@@ -672,9 +497,13 @@ def main(args):
                     if update_text:
                         viz.update_sampled_values(value_sample)
 
-            train_dynamics()
-            train_reward()
-            train_pcont()
+            if args.dynamics_learnable:
+                train_dynamics()
+            if args.reward_learnable:
+                train_reward()
+            if not args.pcont_fixed_length:
+                train_pcont()
+
             train_behavior()
 
         "run the policy on the environment and collect experience"
@@ -818,7 +647,7 @@ def get_args(defaults):
 
 defaults = {
     'env': 'HalfCheetahPyBulletEnv-v0',
-    'connector': 'wm2.env.pybullet.PyBulletConnector',
+    'connector': 'wm2.env.connector:EnvConnector',
     'seed_episodes': 10,
     'collect_interval': 10,
     'batch_size': 40,
@@ -828,11 +657,13 @@ defaults = {
     'lam': 0.95,
     'exploration_noise': 0.25,
 
+    'dynamics_learnable': True,
     'dynamics_lr': 1e-4,
     'dynamics_layers': 1,
     'dynamics_hidden_dim': 300,
     'dynamics_reg': 0.5,
 
+    'pcont_fixed_length': False,
     'pcont_lr': 1e-4,
     'pcont_hidden_dims': [48, 48],
     'pcont_nonlin': 'nn.ELU',
@@ -847,6 +678,7 @@ defaults = {
     'policy_hidden_dims': [48, 48],
     'policy_nonlin': 'nn.ELU',
 
+    'reward_learnable': True,
     'reward_lr': 1e-4,
     'reward_hidden_dims': [300, 300],
     'reward_nonlin': 'nn.ELU',
