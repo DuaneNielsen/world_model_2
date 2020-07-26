@@ -19,18 +19,12 @@ def register(id, entry_point, force=True, **kwargs):
 
 
 register(
-    id='LunarLander-v3',
-    entry_point='wm2.env:LunarLander',
+    id='LunarLanderContinuous-v3',
+    entry_point='wm2.env.LunarLander_v3:LunarLanderContinuous',
     max_episode_steps=1000,
     reward_threshold=200,
 )
 
-register(
-    id='LunarLanderContinuous-v3',
-    entry_point='wm2.env:LunarLanderContinuous',
-    max_episode_steps=1000,
-    reward_threshold=200,
-)
 
 register(
     id='HalfCheetahPyBulletEnv-v1',

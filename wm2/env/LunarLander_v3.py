@@ -22,7 +22,6 @@ import sys, math
 import numpy as np
 
 import Box2D
-import torch
 from Box2D import b2EdgeShape as edgeShape
 from Box2D import b2CircleShape as circleShape
 from Box2D import b2FixtureDef as fixtureDef
@@ -33,8 +32,7 @@ from Box2D import b2ContactListener as contactListener
 import gym
 from gym import spaces
 from gym.utils import seeding, EzPickle
-
-from wm2.distributions import ScaledTanhTransformedGaussian
+from wm2.env.connector import EnvConnector
 
 FPS = 50
 SCALE = 30.0   # affects how fast-paced the game is, forces should be adjusted as well
@@ -397,6 +395,7 @@ class LunarLander(gym.Env, EzPickle):
 class LunarLanderContinuous(LunarLander):
     continuous = True
 
+
 def heuristic(env, s):
     """
     The heuristic for
@@ -462,50 +461,6 @@ def demo_heuristic_lander(env, seed=None, render=False):
     return total_reward
 
 
-if __name__ == '__main__':
-    demo_heuristic_lander(LunarLander(), render=True)
-
-
-class LunarLanderConnector:
-
-    @staticmethod
-    def policy_prepro(state, device):
-        return torch.tensor(state).float().to(device)
-
-    @staticmethod
-    def buffer_prepro(state):
-        return state.astype(np.float32)
-
-    @staticmethod
-    def reward_prepro(reward):
-        return np.array([reward], dtype=np.float32)
-
-    @staticmethod
-    def action_prepro(action):
-        return action.detach().cpu().squeeze().numpy().astype(np.float32)
-
-    @staticmethod
-    def random_policy(state):
-        mu = torch.zeros((2,))
-        scale = torch.full((2,), 0.5)
-        return ScaledTanhTransformedGaussian(mu, scale)
-
-    @staticmethod
-    def reward_mask_f(state, reward, action):
-        r = np.concatenate(reward)
-        less_than_0_3 = r <= 0.3
-        p = np.ones_like(r)
-        num_small_reward = r.shape[0] - less_than_0_3.sum()
-        if num_small_reward > 0:
-            p = p / num_small_reward
-            p = p * ~less_than_0_3
-        else:
-            p = p / r.shape[0]
-        i = np.random.choice(r.shape[0], less_than_0_3.sum(), p=p)
-        less_than_0_3[i] = True
-        return less_than_0_3[:, np.newaxis]
-
-
 def weights(b, log=False, scr=None):
     count = {'0.2': 0, '-1': 0, 'other': 0}
     total = 0
@@ -538,3 +493,31 @@ def weights(b, log=False, scr=None):
             wghts.append(probs['other'])
 
     return wghts
+
+
+class LunarLanderConnector(EnvConnector):
+    def __init__(self, **kwargs):
+        super().__init__()
+
+    @staticmethod
+    def reward_mask_f(state, reward, action):
+        r = np.concatenate(reward)
+        less_than_0_3 = r <= 0.3
+        p = np.ones_like(r)
+        num_small_reward = r.shape[0] - less_than_0_3.sum()
+        if num_small_reward > 0:
+            p = p / num_small_reward
+            p = p * ~less_than_0_3
+        else:
+            p = p / r.shape[0]
+        i = np.random.choice(r.shape[0], less_than_0_3.sum(), p=p)
+        less_than_0_3[i] = True
+        return less_than_0_3[:, np.newaxis]
+
+
+if __name__ == '__main__':
+    demo_heuristic_lander(LunarLander(), render=True)
+
+
+
+
