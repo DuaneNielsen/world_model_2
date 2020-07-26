@@ -86,10 +86,6 @@ class LinEnvConnector(EnvConnector):
     @staticmethod
     def make_reward_model(args):
         return nn.Linear(1, 1, bias=True)
-    
-    @staticmethod
-    def make_pcont_model(args):
-        return SoftplusMLP(layers=[1, 128, 1])
 
     @staticmethod
     def make_viz(args):

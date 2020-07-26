@@ -2,14 +2,17 @@ import numpy as np
 import torch
 from wm2.distributions import ScaledTanhTransformedGaussian
 import torch.distributions as dist
-from wm2.models.models import SoftplusMLP, MLP, StochasticTransitionModel
+from wm2.models.models import SoftplusMLP, MLP, StochasticTransitionModel, Policy
 import gym
 from torch import nn
+from torch.optim import Adam
+
 
 class EnvViz:
 
     def update(self, args, s, policy, R, value, T, pcont):
         pass
+
 
 class RandomPolicy:
     def __init__(self, action_dims):
@@ -44,6 +47,20 @@ class EnvConnector:
             return action.detach().cpu().squeeze().numpy().astype(np.float32)
 
     @staticmethod
+    def make_policy(args):
+        # policy model
+        policy = Policy(layers=[args.state_dims, *args.policy_hidden_dims, args.action_dims], min=args.action_min,
+                        max=args.action_max, nonlin=args.policy_nonlin).to(args.device)
+        policy_optim = Adam(policy.parameters(), lr=args.policy_lr)
+        return policy, policy_optim
+
+    @staticmethod
+    def make_value(args):
+        value = MLP([args.state_dims, *args.value_hidden_dims, 1], nonlin=args.value_nonlin).to(args.device)
+        value_optim = Adam(value.parameters(), lr=args.value_lr)
+        return value, value_optim
+
+    @staticmethod
     def make_random_policy(env):
         return RandomPolicy(env.action_space.shape[0])
 
@@ -76,7 +93,9 @@ class EnvConnector:
 
     @staticmethod
     def make_pcont_model(args):
-        return SoftplusMLP([args.state_dims, *args.pcont_hidden_dims, 1])
+        pcont = SoftplusMLP([args.state_dims, *args.pcont_hidden_dims, 1]).to(args.device)
+        pcont_optim = Adam(pcont.parameters(), lr=args.pcont_lr)
+        return pcont, pcont_optim
 
     @staticmethod
     def make_reward_model(args):

@@ -37,6 +37,33 @@ import wm2.utils
 import wm2.env.wrappers
 
 
+def mse_loss(trajectories, predicted_state):
+    loss = ((trajectories.next_state.to(args.device) - predicted_state) ** 2) * trajectories.pad.to(
+        args.device)
+    return loss.mean()
+
+
+def log_prob_loss_simple(trajectories, predicted_state):
+    return - predicted_state.log_prob(trajectories.next_state.to(args.device)).mean()
+
+
+def log_prob_loss(trajectories, predicted_state):
+    prior = Normal(predicted_state.loc[0:-1], predicted_state.scale[0:-1])
+    posterior = Normal(predicted_state.loc[1:], predicted_state.scale[1:])
+    div = kl_divergence(prior, posterior).mean()
+    log_p = predicted_state.log_prob(trajectories.next_state.to(args.device)).mean()
+    return div * args.dynamics_reg - log_p
+
+
+def log_prob_loss_entropy(trajectories, predicted_state):
+    prior = Normal(predicted_state.loc[0:-1], predicted_state.scale[0:-1])
+    posterior = Normal(predicted_state.loc[1:], predicted_state.scale[1:])
+    #div = kl_divergence(prior, posterior).mean()
+    log_p = predicted_state.log_prob(trajectories.next_state.to(args.device)).mean()
+    entropy = posterior.entropy().mean()
+    return - log_p - entropy
+
+
 def gather_experience(buff, episode, env, connector, policy, eps=0.0, expln_noise=0.0, render=True, seed=None,
                       delay=0.01):
     with torch.no_grad():
@@ -90,33 +117,6 @@ def gather_seed_episodes(env, connector, random_policy, buff, seed_episodes):
     return buff
 
 
-def mse_loss(trajectories, predicted_state):
-    loss = ((trajectories.next_state.to(args.device) - predicted_state) ** 2) * trajectories.pad.to(
-        args.device)
-    return loss.mean()
-
-
-def log_prob_loss_simple(trajectories, predicted_state):
-    return - predicted_state.log_prob(trajectories.next_state.to(args.device)).mean()
-
-
-def log_prob_loss(trajectories, predicted_state):
-    prior = Normal(predicted_state.loc[0:-1], predicted_state.scale[0:-1])
-    posterior = Normal(predicted_state.loc[1:], predicted_state.scale[1:])
-    div = kl_divergence(prior, posterior).mean()
-    log_p = predicted_state.log_prob(trajectories.next_state.to(args.device)).mean()
-    return div * args.dynamics_reg - log_p
-
-
-def log_prob_loss_entropy(trajectories, predicted_state):
-    prior = Normal(predicted_state.loc[0:-1], predicted_state.scale[0:-1])
-    posterior = Normal(predicted_state.loc[1:], predicted_state.scale[1:])
-    #div = kl_divergence(prior, posterior).mean()
-    log_p = predicted_state.log_prob(trajectories.next_state.to(args.device)).mean()
-    entropy = posterior.entropy().mean()
-    return - log_p - entropy
-
-
 def make_connector(args):
     module_name, connector_class_name = args.connector.split(':')
     connector_module = importlib.import_module(module_name)
@@ -135,26 +135,24 @@ def determinism(seed):
 
 
 def main(args):
-    # curses
-    scr = Curses()
 
-    # monitoring
+    """ monitoring """
+    scr = Curses()
     recent_reward = deque(maxlen=20)
     wandb.gym.monitor()
     imagine_log_cooldown = wm2.utils.Cooldown(secs=30)
     viz_cooldown = wm2.utils.Cooldown(secs=args.viz_cooldown)
     render_cooldown = wm2.utils.Cooldown(secs=120)
     episode_refresh = wm2.utils.Cooldown(secs=60)
-
-    # viz
     viz = Viz(args=args, window_title=f'{wandb.run.project} {wandb.run.id}')
 
+    """ connect environment """
     connector = make_connector(args)
     env = connector.make_env(args)
     random_policy = connector.make_random_policy(env)
     env_viz = connector.make_viz(args)
 
-    # experience buffers
+    """ experience buffers """
     train_buff = Buffer(p_cont_algo=args.pcont_algo, terminal_repeats=args.pcont_terminal_repeats)
     test_buff = Buffer(p_cont_algo=args.pcont_algo, terminal_repeats=args.pcont_terminal_repeats)
     train_buff = gather_seed_episodes(env, connector, random_policy, train_buff, args.seed_episodes)
@@ -162,45 +160,25 @@ def main(args):
     train_episode, test_episode = args.seed_episodes, args.seed_episodes
     dummy_buffer = DummyBuffer()
 
-    eps = 0.05
+    """ policy model """
+    policy, policy_optim = connector.make_policy(args)
 
-    # policy model
-    policy = Policy(layers=[args.state_dims, *args.policy_hidden_dims, args.action_dims], min=args.action_min,
-                    max=args.action_max, nonlin=args.policy_nonlin).to(args.device)
-    policy_optim = Adam(policy.parameters(), lr=args.policy_lr)
+    """ value model"""
+    value, value_optim = connector.make_value(args)
 
-    # value model
-    # value = nn.Linear(state_dims, 1)
-    value = MLP([args.state_dims, *args.value_hidden_dims, 1], nonlin=args.value_nonlin).to(args.device)
-    value_optim = Adam(value.parameters(), lr=args.value_lr)
+    """ probability of continuing """
+    pcont, pcont_optim = connector.make_pcont_model(args)
 
-    # transition model
-    # T = nn.LSTM(input_size=args.state_dims + args.action_dims, hidden_size=args.state_dims, num_layers=1).to(args.device)
-    # T = TransitionModel(input_dim=args.state_dims + args.action_dims,
-    #                     hidden_dim=args.transition_hidden_dim, output_dim=args.state_dims,
-    #                     layers=args.transition_layers).to(args.device)
-    # T = GRU(input_dim=args.state_dims + args.action_dims,
-    #                     hidden_dim=args.transition_hidden_dim, output_dim=args.state_dims,
-    #                     layers=args.transition_layers).to(args.device)
-
+    """ dynamics function or model"""
     T = connector.make_transition_model(args).to(args.device)
     if args.dynamics_learnable:
         T_optim = Adam(T.parameters(), lr=args.dynamics_lr)
     t_criterion = log_prob_loss
 
-    # reward model
-    # R = HandcraftedPrior(args.state_dims, args.reward_hidden_dims, nonlin=args.nonlin).to(args.device)
-    # R = Mixture(args.state_dims, args.reward_hidden_dims, nonlin=args.nonlin).to(args.device)
-    # R = MLP([args.state_dims, *args.reward_hidden_dims, 1], nonlin=args.reward_nonlin).to(args.device)
-    # R = nn.Linear(state_dims, 1)
-
+    """ reward function or model"""
     R = connector.make_reward_model(args).to(args.device)
     if args.reward_learnable:
         R_optim = Adam(R.parameters(), lr=args.reward_lr)
-
-    """ probability of continuing """
-    pcont = connector.make_pcont_model(args).to(args.device)
-    pcont_optim = Adam(pcont.parameters(), lr=args.pcont_lr)
 
     "save and restore helpers"
     R_saver = wm2.utils.SaveLoad('reward')
@@ -228,7 +206,7 @@ def main(args):
                             f'train_buff size {len(sample_train_buff)} rejects {sample_train_buff.rejects}')
 
             def train_dynamics():
-                # Dynamics learning
+                """ train the dynamics model """
                 train, test = SARNextDataset(sample_train_buff, mask_f=None), SARNextDataset(sample_test_buff,
                                                                                              mask_f=None)
                 train = DataLoader(train, batch_size=args.batch_size, collate_fn=pad_collate_2, shuffle=True)
@@ -261,6 +239,9 @@ def main(args):
                 #     wandb.log({'transition_test': loss.item()})
 
             def train_reward():
+                """ train the reward model
+                note: since rewards are sparse, this is the most difficult to model
+                therefore hand-coding your reward function, if possible, is much superior """
 
                 # train_weights, test_weights = weights(sample_train_buff, log=True), weights(sample_test_buff)
                 # train_sampler = WeightedRandomSampler(train_weights, len(train_weights), replacement=True)
@@ -294,7 +275,8 @@ def main(args):
 
             def train_pcont():
 
-                """ probability of continuing """
+                """ probability of continuing: what is the chance the episode will continue in the next step """
+                """ note that this is a proxy value function, it's estimated using a bellman-type update """
                 train, test = SARDataset(sample_train_buff, mask_f=None), SARDataset(sample_test_buff, mask_f=None)
                 train = DataLoader(train, batch_size=args.batch_size, collate_fn=pad_collate_2, shuffle=True)
                 test = DataLoader(test, batch_size=args.batch_size, collate_fn=pad_collate_2, shuffle=True)
