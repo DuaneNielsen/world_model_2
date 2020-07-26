@@ -32,27 +32,6 @@ class DiffReward(nn.Module):
         return reward
 
 
-class PyBulletConnector(EnvConnector):
-
-    def make_reward_model(self, args):
-        return DiffReward(args)
-
-    @staticmethod
-    def reward_mask_f(state, reward, action):
-        r = np.concatenate(reward)
-        less_than_0_3 = r <= 0.3
-        p = np.ones_like(r)
-        num_small_reward = r.shape[0] - less_than_0_3.sum()
-        if num_small_reward > 0:
-            p = p / num_small_reward
-            p = p * ~less_than_0_3
-        else:
-            p = p / r.shape[0]
-        i = np.random.choice(r.shape[0], less_than_0_3.sum(), p=p)
-        less_than_0_3[i] = True
-        return less_than_0_3[:, np.newaxis]
-
-
 class PybulletWalkerWrapper(gym.Wrapper):
     def __init__(self, env, args):
         super().__init__(env)
@@ -90,3 +69,48 @@ class PybulletWalkerWrapper(gym.Wrapper):
         rew = speed * self.args.forward_slope
         rew = rew * (1.0 - done_flag)
         return state, rew.item(), done, info
+
+
+class PyBulletInvertedPendulum(EnvConnector):
+    def __init__(self, **kwargs):
+        super().__init__()
+
+    def make_env(self, args):
+        env = gym.make(args.env)
+        self.set_env_dims(args, env)
+        env.render()
+        return env
+
+
+class PyBulletCheetahConnector(EnvConnector):
+    def __init__(self, **kwargs):
+        super().__init__()
+
+    def make_env(self, args):
+        # environment
+        env = gym.make(args.env)
+        self.set_env_dims(args, env)
+        # env = wm2.env.wrappers.ConcatPrev(env)
+        # env = wm2.env.wrappers.AddDoneToState(env)
+        # env = wm2.env.wrappers.RewardOneIfNotDone(env)
+        env = PybulletWalkerWrapper(env, args)
+        env.render()
+        return env
+
+    def make_reward_model(self, args):
+        return DiffReward(args)
+
+    @staticmethod
+    def reward_mask_f(state, reward, action):
+        r = np.concatenate(reward)
+        less_than_0_3 = r <= 0.3
+        p = np.ones_like(r)
+        num_small_reward = r.shape[0] - less_than_0_3.sum()
+        if num_small_reward > 0:
+            p = p / num_small_reward
+            p = p * ~less_than_0_3
+        else:
+            p = p / r.shape[0]
+        i = np.random.choice(r.shape[0], less_than_0_3.sum(), p=p)
+        less_than_0_3[i] = True
+        return less_than_0_3[:, np.newaxis]

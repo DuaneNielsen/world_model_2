@@ -1,5 +1,5 @@
-env: 'InvertedPendulumPyBulletEnv-v0'
-connector: 'wm2.env.pybullet.PyBulletConnector'
+env: 'InvertedPendulumBulletEnv-v0'
+connector: 'wm2.env.pybullet:PyBulletInvertedPendulum'
 seed_episodes: 5
 collect_interval: 10
 batch_size: 40

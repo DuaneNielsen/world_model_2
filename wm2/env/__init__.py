@@ -1,8 +1,5 @@
 import gym
-
-#from gym.envs.registration import registry, register, make, spec
-# from wm2.env.LunarLander_v3 import LunarLander
-# from wm2.env.LunarLander_v3 import LunarLanderContinuous
+import pybullet_envs
 
 
 def register(id, entry_point, force=True, **kwargs):
