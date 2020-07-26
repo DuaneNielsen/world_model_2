@@ -1,34 +1,23 @@
 import numpy as np
 import torch
 from matplotlib import pyplot as plt
+from wm2.env.connector import EnvConnector, EnvViz
 
-from wm2.distributions import TanhTransformedGaussian
 
+class PendulumConnector(EnvConnector):
+    def __init__(self, **kwargs):
+        super().__init__()
 
-class PendulumConnector:
-
-    @staticmethod
-    def policy_prepro(state, device):
-        return torch.tensor(state).float().to(device)
-
-    @staticmethod
-    def buffer_prepro(state):
-        return state.astype(np.float32)
+    # @staticmethod
+    # def action_prepro(action):
+    #     return np.array([action.item()], dtype=np.float32)
 
     @staticmethod
-    def random_policy(state):
-        return TanhTransformedGaussian(0.0, 0.5)
-
-    @staticmethod
-    def reward_prepro(reward):
-        return np.array([reward], dtype=np.float32)
-
-    @staticmethod
-    def action_prepro(action):
-        return np.array([action.item()], dtype=np.float32)
+    def make_viz(args):
+        return PendulumViz()
 
 
-class PendulumViz:
+class PendulumViz(EnvViz):
     def __init__(self):
         # visualization
         plt.ion()
@@ -50,7 +39,7 @@ class PendulumViz:
         # self.polar.set_rticks([0.5, 1, 1.5, 2])  # Less radial ticks
         # self.polar.set_rlabel_position(-22.5)  # Move radial labels away from plotted line
 
-    def plot_value(self, value):
+    def update(self, args, test_buff, policy, R, value, T, pcont):
         with torch.no_grad():
             for i, speed in enumerate(self.speeds):
                 theta = np.arange(0, np.pi * 2, 0.01, dtype=np.float32)[:, np.newaxis]

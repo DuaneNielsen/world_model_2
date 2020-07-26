@@ -14,6 +14,16 @@ class EnvViz:
         pass
 
 
+class PcontFixed(nn.Module):
+    """ dummy function that always returns 1.0 for pcont """
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x):
+        shape = len(x.shape) - 1
+        return torch.ones((*x.shape[0:shape], 1), device=x.device)
+
+
 class RandomPolicy:
     def __init__(self, action_dims):
         super().__init__()
@@ -78,11 +88,8 @@ class EnvConnector:
         # env = wm2.env.wrappers.AddDoneToState(env)
         # env = wm2.env.wrappers.RewardOneIfNotDone(env)
         # env = wm2.env.pybullet.PybulletWalkerWrapper(env, args)
-        env.render()
+        # env.render()
 
-        # env = gym.wrappers.TransformReward(env, alwaysone)
-
-        # env.connector = LunarLanderConnector
         return env
 
     @staticmethod
@@ -93,6 +100,9 @@ class EnvConnector:
 
     @staticmethod
     def make_pcont_model(args):
+        if args.pcont_fixed_length:
+            return PcontFixed(), None
+
         pcont = SoftplusMLP([args.state_dims, *args.pcont_hidden_dims, 1]).to(args.device)
         pcont_optim = Adam(pcont.parameters(), lr=args.pcont_lr)
         return pcont, pcont_optim

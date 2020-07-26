@@ -140,10 +140,10 @@ def main(args):
     scr = Curses()
     recent_reward = deque(maxlen=20)
     wandb.gym.monitor()
-    imagine_log_cooldown = wm2.utils.Cooldown(secs=30)
+    imagine_log_cooldown = wm2.utils.Cooldown(secs=args.viz_imagine_log_cooldown)
     viz_cooldown = wm2.utils.Cooldown(secs=args.viz_cooldown)
-    render_cooldown = wm2.utils.Cooldown(secs=120)
-    episode_refresh = wm2.utils.Cooldown(secs=60)
+    render_cooldown = wm2.utils.Cooldown(secs=args.viz_render_cooldown)
+    episode_refresh = wm2.utils.Cooldown(secs=args.viz_episode_refresh)
     viz = Viz(args=args, window_title=f'{wandb.run.project} {wandb.run.id}')
 
     """ connect environment """
@@ -646,6 +646,9 @@ defaults = {
     'forward_slope': 28,
 
     'viz_cooldown': 240,
+    'viz_imagine_log_cooldown': 30,
+    'viz_render_cooldown': 240,
+    'viz_episode_refresh': 60,
 
     'best_policy_sample_n': 10,
     'demo': 'off',

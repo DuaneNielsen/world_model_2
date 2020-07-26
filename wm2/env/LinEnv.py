@@ -62,7 +62,6 @@ class LineViz(EnvViz):
         self.fig.canvas.draw()
 
 
-
 class SimpleTransition(nn.Module):
     def __init__(self):
         super().__init__()
