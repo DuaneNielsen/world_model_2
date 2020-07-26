@@ -1,0 +1,37 @@
+env: 'LinEnv-v1'
+connector: 'wm2.env.LinEnv:LinEnvConnector'
+seed_episodes: 5
+collect_interval: 10
+batch_size: 40
+horizon: 15
+discount: 0.99
+lam: 0.95
+exploration_noise: 0.25
+
+dynamics:
+  lr: 1e-2
+  layers: 1
+  hidden_dim: 1
+
+value:
+  lr: 1e-2
+  hidden_dims: [1]
+  nonlin: 'nn.ELU'
+
+policy:
+  lr: 2e-3
+  hidden_dims: [128]
+  nonlin: 'nn.ELU'
+
+reward:
+  lr: 1e-2
+  hidden_dims: [1]
+  nonlin: 'nn.ELU'
+
+pcont:
+  lr: 1e-2
+  hidden_dims: [128]
+  nonlin: 'nn.ELU'
+
+viz:
+  cooldown: 0
