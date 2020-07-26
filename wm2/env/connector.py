@@ -3,20 +3,26 @@ import torch
 from wm2.distributions import ScaledTanhTransformedGaussian
 import torch.distributions as dist
 from wm2.models.models import SoftplusMLP, MLP, StochasticTransitionModel
+import gym
+from torch import nn
+
+class EnvViz:
+
+    def update(self, args, s, policy, R, value, T, pcont):
+        pass
+
+class RandomPolicy:
+    def __init__(self, action_dims):
+        super().__init__()
+        self.action_dims = action_dims
+
+    def __call__(self, state):
+        mu = torch.zeros((1, self.action_dims,))
+        scale = torch.full((1, self.action_dims,), 0.5)
+        return ScaledTanhTransformedGaussian(mu, scale)
 
 
 class EnvConnector:
-    def __init__(self, **kwargs):
-        """ required arguments, state_dims, action_dims """
-        self.state_dims = None
-        self.action_dims = None
-
-        self.__dict__.update(**kwargs)
-
-        if self.state_dims is None:
-            raise Exception('state_dims not set on connector, fix the observation_space on env')
-        if self.action_dims is None:
-            raise Exception('action_dims not set on connector, fix the action_space on env')
 
     @staticmethod
     def policy_prepro(state, device):
@@ -37,20 +43,36 @@ class EnvConnector:
         else:
             return action.detach().cpu().squeeze().numpy().astype(np.float32)
 
-    def random_policy(self, state):
-        mu = torch.zeros((1, self.action_dims,))
-        scale = torch.full((1, self.action_dims,), 0.5)
-        return ScaledTanhTransformedGaussian(mu, scale)
+    @staticmethod
+    def make_random_policy(env):
+        return RandomPolicy(env.action_space.shape[0])
 
-    def uniform_random_policy(self, state):
-        mu = torch.ones((state.size(0), self.action_dims,))
-        return dist.Uniform(-mu, mu)
+    def set_env_dims(self, args, env):
+        args.state_dims = env.observation_space.shape[0]
+        args.action_dims = env.action_space.shape[0]
+        args.action_min = -1.0
+        args.action_max = 1.0
+
+    def make_env(self, args):
+        # environment
+        env = gym.make(args.env)
+        self.set_env_dims(args, env)
+        # env = wm2.env.wrappers.ConcatPrev(env)
+        # env = wm2.env.wrappers.AddDoneToState(env)
+        # env = wm2.env.wrappers.RewardOneIfNotDone(env)
+        # env = wm2.env.pybullet.PybulletWalkerWrapper(env, args)
+        env.render()
+
+        # env = gym.wrappers.TransformReward(env, alwaysone)
+
+        # env.connector = LunarLanderConnector
+        return env
 
     @staticmethod
     def make_transition_model(args):
         return StochasticTransitionModel(input_dim=args.state_dims + args.action_dims,
                                   hidden_dim=args.dynamics_hidden_dim, output_dim=args.state_dims,
-                                  layers=args.dynamics_layers)
+                                  layers=args.dynamics_layers, dropout=args.dynamics_dropout)
 
     @staticmethod
     def make_pcont_model(args):
@@ -59,3 +81,7 @@ class EnvConnector:
     @staticmethod
     def make_reward_model(args):
         return MLP([args.state_dims, *args.reward_hidden_dims, 1], nonlin=args.reward_nonlin)
+
+    @staticmethod
+    def make_viz(args):
+        return EnvViz()

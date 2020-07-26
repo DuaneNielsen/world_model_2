@@ -238,51 +238,6 @@ class Curses:
         self.refresh()
 
 
-class LineViz:
-    def __init__(self):
-        plt.ion()
-        self.fig = plt.figure(num=None, figsize=(16, 12), dpi=80, facecolor='w', edgecolor='k')
-        self.ax1 = self.fig.add_subplot(221)
-        self.ax2 = self.fig.add_subplot(222)
-        self.ax3 = self.fig.add_subplot(223)
-        self.ax4 = self.fig.add_subplot(224)
-        s = torch.linspace(-2.5, 2.5, 20).view(-1, 1)
-        z = torch.zeros(20, 1)
-        self.l_actions, = self.ax1.plot(s, z, 'b-', label='policy(state)')
-        self.l_rewards, = self.ax2.plot(s, z, 'b-', label='reward(state)')
-        self.l_next_state_0_2, = self.ax3.plot(s, z, 'b-', label='T(state,0.2)')
-        self.l_next_state_minus_0_2, = self.ax3.plot(s, z, 'r-', label='T(state,-0.2)')
-        self.l_value, = self.ax4.plot(s, z, 'b-', label='value(state)')
-        self.ax1.legend(), self.ax2.legend(), self.ax3.legend(), self.ax4.legend()
-
-    def update(self, s, policy, R, value, T):
-
-        a = policy.mu(s)
-        r = R(s)
-        v = value(s)
-
-        s_0_2 = torch.cat((s.view(1, -1, 1), torch.full((1, 20, 1), 0.2)), dim=2)
-        s_minus_0_2 = torch.cat((s.view(1, -1, 1), torch.full((1, 20, 1), -0.2)), dim=2)
-        next_state_0_2, hidden = T(s_0_2)
-        next_state_minus_0_2, hidden = T(s_minus_0_2)
-
-        self.l_actions.set_ydata(a.detach().cpu().numpy())
-        self.l_rewards.set_ydata(r.detach().cpu().numpy())
-        self.l_next_state_0_2.set_ydata(next_state_0_2.detach().cpu().numpy())
-        self.l_next_state_minus_0_2.set_ydata(next_state_minus_0_2.detach().cpu().numpy())
-        self.l_value.set_ydata(v.detach().cpu().numpy())
-
-        self.ax1.relim()
-        self.ax1.autoscale_view()
-        self.ax2.relim()
-        self.ax2.autoscale_view()
-        self.ax3.relim()
-        self.ax3.autoscale_view()
-        self.ax4.relim()
-        self.ax4.autoscale_view()
-        self.fig.canvas.draw()
-
-
 class HistogramPanel:
     def __init__(self, fig, panels, fig_index, label):
         self.fig = fig
@@ -506,7 +461,6 @@ class Viz:
             #self.live_dynamics_done_prob.update(done_p)
             #self.live_dynamics_contact_prob.update(contact_p)
 
-
     def sample_grad_norm(self, model, sample=0.01):
         if random.random() < sample:
             total_norm = 0
@@ -517,7 +471,7 @@ class Viz:
             self.policy_grad_norm.update(total_norm)
             self.fig.canvas.draw()
 
-    def update_dynamics(self, b, T, policy):
+    def update_dynamics(self, b, T):
         with torch.no_grad():
             if len(b.index) < self.samples_in_histogram:
                 index = b.index

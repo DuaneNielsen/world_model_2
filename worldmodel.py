@@ -37,7 +37,7 @@ import wm2.utils
 import wm2.env.wrappers
 
 
-def gather_experience(buff, episode, env, policy, eps=0.0, eps_policy=None, expln_noise=0.0, render=True, seed=None,
+def gather_experience(buff, episode, env, connector, policy, eps=0.0, expln_noise=0.0, render=True, seed=None,
                       delay=0.01):
     with torch.no_grad():
         # gather new experience
@@ -47,9 +47,10 @@ def gather_experience(buff, episode, env, policy, eps=0.0, eps_policy=None, expl
             env.seed(seed)
         state, reward, done = env.reset(), 0.0, False
         episode_reward += [reward]
+        eps_policy = connector.make_random_policy(env)
 
         def get_action(state, reward, done):
-            t_state = env.connector.policy_prepro(state, args.device).unsqueeze(0)
+            t_state = connector.policy_prepro(state, args.device).unsqueeze(0)
             if random.random() >= eps:
                 action_dist = policy(t_state)
                 action = action_dist.rsample()
@@ -58,11 +59,11 @@ def gather_experience(buff, episode, env, policy, eps=0.0, eps_policy=None, expl
             else:
                 action_dist = eps_policy(t_state)
                 action = action_dist.rsample()
-            action = env.connector.action_prepro(action)
+            action = connector.action_prepro(action)
             buff.append(episode,
-                        env.connector.buffer_prepro(state),
+                        connector.buffer_prepro(state),
                         action,
-                        env.connector.reward_prepro(reward),
+                        connector.reward_prepro(reward),
                         done,
                         None)
             if render:
@@ -83,9 +84,9 @@ def gather_experience(buff, episode, env, policy, eps=0.0, eps_policy=None, expl
     return buff, episode_reward, episode_entropy
 
 
-def gather_seed_episodes(env, buff, seed_episodes):
+def gather_seed_episodes(env, connector, random_policy, buff, seed_episodes):
     for episode in range(seed_episodes):
-        gather_experience(buff, episode, env, env.connector.random_policy, render=False)
+        gather_experience(buff, episode, env, connector, random_policy, render=False)
     return buff
 
 
@@ -116,42 +117,12 @@ def log_prob_loss_entropy(trajectories, predicted_state):
     return - log_p - entropy
 
 
-def make_env():
-    # environment
-    env = gym.make(args.env)
-    #env = wm2.env.wrappers.ConcatPrev(env)
-    #env = wm2.env.wrappers.AddDoneToState(env)
-    #env = wm2.env.wrappers.RewardOneIfNotDone(env)
-    #env = wm2.env.pybullet.PybulletWalkerWrapper(env, args)
-    env.render()
-
-    args.state_dims = env.observation_space.shape[0]
-    args.action_dims = env.action_space.shape[0]
-    args.action_min = -1.0
-    args.action_max = 1.0
-
-    # def normalize_reward(reward):
-    #     return reward / 100.0
-
-    # def increase_negative(reward):
-    #     if reward < -0.5:
-    #         return - 4 * (reward - 0.5) ** 2
-    #     else:
-    #         return reward
-
-    # def boost(reward):
-    #     return reward * 1000.0
-    #
-
-
-    #env = gym.wrappers.TransformReward(env, alwaysone)
-
+def make_connector(args):
     module_name, connector_class_name = args.connector.split(':')
     connector_module = importlib.import_module(module_name)
     connector = getattr(connector_module, connector_class_name)
-    env.connector = connector(**vars(args))
-    # env.connector = LunarLanderConnector
-    return env
+    connector = connector(**vars(args))
+    return connector
 
 
 def determinism(seed):
@@ -171,20 +142,23 @@ def main(args):
     recent_reward = deque(maxlen=20)
     wandb.gym.monitor()
     imagine_log_cooldown = wm2.utils.Cooldown(secs=30)
-    viz_cooldown = wm2.utils.Cooldown(secs=240)
+    viz_cooldown = wm2.utils.Cooldown(secs=args.viz_cooldown)
     render_cooldown = wm2.utils.Cooldown(secs=120)
     episode_refresh = wm2.utils.Cooldown(secs=60)
 
     # viz
     viz = Viz(args=args, window_title=f'{wandb.run.project} {wandb.run.id}')
 
-    env = make_env()
+    connector = make_connector(args)
+    env = connector.make_env(args)
+    random_policy = connector.make_random_policy(env)
+    env_viz = connector.make_viz(args)
 
     # experience buffers
     train_buff = Buffer(p_cont_algo=args.pcont_algo, terminal_repeats=args.pcont_terminal_repeats)
     test_buff = Buffer(p_cont_algo=args.pcont_algo, terminal_repeats=args.pcont_terminal_repeats)
-    train_buff = gather_seed_episodes(env, train_buff, args.seed_episodes)
-    test_buff = gather_seed_episodes(env, test_buff, args.seed_episodes)
+    train_buff = gather_seed_episodes(env, connector, random_policy, train_buff, args.seed_episodes)
+    test_buff = gather_seed_episodes(env, connector, random_policy, test_buff, args.seed_episodes)
     train_episode, test_episode = args.seed_episodes, args.seed_episodes
     dummy_buffer = DummyBuffer()
 
@@ -209,7 +183,7 @@ def main(args):
     #                     hidden_dim=args.transition_hidden_dim, output_dim=args.state_dims,
     #                     layers=args.transition_layers).to(args.device)
 
-    T = env.connector.make_transition_model(args).to(args.device)
+    T = connector.make_transition_model(args).to(args.device)
     if args.dynamics_learnable:
         T_optim = Adam(T.parameters(), lr=args.dynamics_lr)
     t_criterion = log_prob_loss
@@ -220,12 +194,12 @@ def main(args):
     # R = MLP([args.state_dims, *args.reward_hidden_dims, 1], nonlin=args.reward_nonlin).to(args.device)
     # R = nn.Linear(state_dims, 1)
 
-    R = env.connector.make_reward_model(args).to(args.device)
+    R = connector.make_reward_model(args).to(args.device)
     if args.reward_learnable:
         R_optim = Adam(R.parameters(), lr=args.reward_lr)
 
     """ probability of continuing """
-    pcont = env.connector.make_pcont_model(args).to(args.device)
+    pcont = connector.make_pcont_model(args).to(args.device)
     pcont_optim = Adam(pcont.parameters(), lr=args.pcont_lr)
 
     "save and restore helpers"
@@ -260,7 +234,8 @@ def main(args):
                 train = DataLoader(train, batch_size=args.batch_size, collate_fn=pad_collate_2, shuffle=True)
                 test = DataLoader(test, batch_size=args.batch_size, collate_fn=pad_collate_2, shuffle=True)
 
-                T.dropout_on()
+                if hasattr(T, 'dropout'):
+                    T.dropout_on()
 
                 # train transition model
                 for trajectories in train:
@@ -275,7 +250,8 @@ def main(args):
                     wandb.log({'transition_train': loss.item()})
                     T_saver.checkpoint(T, T_optim)
 
-                T.dropout_off()
+                if hasattr(T, 'dropout'):
+                    T.dropout_off()
 
                 # for trajectories in test:
                 #     input = torch.cat((trajectories.state, trajectories.action), dim=2).to(args.device)
@@ -507,8 +483,8 @@ def main(args):
             train_behavior()
 
         "run the policy on the environment and collect experience"
-        train_buff, reward, entropy = gather_experience(train_buff, train_episode, env, policy,
-                                               eps=0.0, eps_policy=env.connector.random_policy, seed=args.seed,
+        train_buff, reward, entropy = gather_experience(train_buff, train_episode, env, connector, policy,
+                                               eps=0.0, seed=args.seed,
                                                render=render_cooldown(), expln_noise=args.exploration_noise)
         if episode_refresh():
             viz.update_trajectory_plots(value, R, pcont, T, train_buff, train_episode, entropy)
@@ -532,8 +508,8 @@ def main(args):
             sampled_rewards = []
 
             for _ in range(args.best_policy_sample_n):
-                dummy_buffer, reward, entropy = gather_experience(dummy_buffer, train_episode, env, policy,
-                                                       eps=0.0, eps_policy=env.connector.random_policy,
+                dummy_buffer, reward, entropy = gather_experience(dummy_buffer, train_episode, env, connector, policy,
+                                                       eps=0.0,
                                                        expln_noise=0.0, seed=args.seed)
                 sampled_rewards.append(sum(reward))
             if mean(sampled_rewards) > best_stats['mean']:
@@ -548,21 +524,22 @@ def main(args):
 
                 policy_saver.save(policy, 'best', **best_stats)
 
-        test_buff, reward, entropy = gather_experience(test_buff, test_episode, env, policy,
-                                              eps=0.0, eps_policy=env.connector.random_policy,
+        test_buff, reward, entropy = gather_experience(test_buff, test_episode, env, connector, policy,
+                                              eps=0.0,
                                               render=False, expln_noise=args.exploration_noise, seed=args.seed)
         test_episode += 1
 
         if viz_cooldown():
             viz.plot_rewards_histogram(train_buff, R)
-            viz.update_dynamics(test_buff, T, env.connector.uniform_random_policy)
+            viz.update_dynamics(test_buff, T)
             viz.update_pcont(test_buff, pcont)
             viz.update_value(test_buff, value)
+            env_viz.update(args, test_buff, policy, R, value, T, pcont)
 
         converged = False
 
 
-def demo(dir, env, n=100):
+def demo(dir, env, connector, n=100):
 
     args.state_dims = env.observation_space.shape[0]
     args.action_dims = env.action_space.shape[0]
@@ -585,8 +562,8 @@ def demo(dir, env, n=100):
                 msg += f'{arg}: {value} '
         print(msg)
         policy.load_state_dict(load_dict['model'])
-        train_buff, reward, entropy = gather_experience(dummy_buffer, 0, env, policy,
-                                               eps=0.0, eps_policy=env.connector.random_policy,
+        train_buff, reward, entropy = gather_experience(dummy_buffer, 0, env, connector, policy,
+                                               eps=0.0,
                                                render=True, delay=1.0 / args.fps)
         iterations += 1
 
@@ -662,6 +639,7 @@ defaults = {
     'dynamics_layers': 1,
     'dynamics_hidden_dim': 300,
     'dynamics_reg': 0.5,
+    'dynamics_dropout': 0.0,
 
     'pcont_fixed_length': False,
     'pcont_lr': 1e-4,
@@ -685,6 +663,8 @@ defaults = {
 
     'forward_slope': 28,
 
+    'viz_cooldown': 240,
+
     'best_policy_sample_n': 10,
     'demo': 'off',
     'seed': None,
@@ -707,6 +687,7 @@ if __name__ == '__main__':
             curses.wrapper(main(args))
         else:
             wandb_run_dir = str(next(pathlib.Path().glob(f'wandb/*{args.demo}')))
-            env = make_env()
+            connector = make_connector(args)
+            env = connector.make_env()
             env.render()
-            demo(wandb_run_dir, env)
+            demo(wandb_run_dir, env, connector)

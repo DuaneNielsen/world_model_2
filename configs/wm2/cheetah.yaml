@@ -13,6 +13,7 @@ dynamics:
   lr: 1e-3
   layers: 1
   hidden_dim: 48
+  dropout: 0.2
 
 value:
   lr: 1e-3
