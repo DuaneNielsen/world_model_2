@@ -299,6 +299,14 @@ class LiveLine:
         self.live.relim()
         self.live.autoscale_view()
 
+    def draw(self):
+        self.live.clear()
+        y = np.array(self.dq)
+        self.live.set_title(self.label)
+        self.live.plot(y)
+        self.live.relim()
+        self.live.autoscale_view()
+
     def reset(self):
         self.live.clear()
         self.dq = deque(maxlen=self.rew_live_length)
@@ -437,7 +445,6 @@ class Viz:
             self.update_episode_dynamics(T, s, a)
             self.update_policy_entropy(entropy)
             self.fig.canvas.draw()
-
 
     def update_episode_value(self, value, s):
         with torch.no_grad():

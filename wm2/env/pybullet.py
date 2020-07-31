@@ -71,7 +71,7 @@ class PybulletWalkerWrapper(gym.Wrapper):
         return state, rew.item(), done, info
 
 
-class PyBulletInvertedPendulum(EnvConnector):
+class PyBulletEnv(EnvConnector):
     def __init__(self, **kwargs):
         super().__init__()
 

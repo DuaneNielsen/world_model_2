@@ -27,7 +27,7 @@ import gym
 import gym.wrappers
 
 from models.models import MLP, SoftplusMLP, Policy, StochasticTransitionModel
-from wm2.viz import Viz
+from wm2.viz import Viz, DummyCurses
 from wm2.viz import Curses
 from wm2.data.datasets import Buffer, SARDataset, SARNextDataset, SimpleRewardDataset, DummyBuffer, \
     SubsetSequenceBuffer
@@ -137,7 +137,7 @@ def determinism(seed):
 def main(args):
 
     """ monitoring """
-    scr = Curses()
+    scr = DummyCurses()
     recent_reward = deque(maxlen=20)
     wandb.gym.monitor()
     imagine_log_cooldown = wm2.utils.Cooldown(secs=args.viz_imagine_log_cooldown)
