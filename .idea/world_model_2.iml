@@ -13,6 +13,8 @@
     <orderEntry type="module" module-name="keypoints" />
     <orderEntry type="module" module-name="iic" />
     <orderEntry type="module" module-name="cma-es" />
+    <orderEntry type="module" module-name="odeint" />
+    <orderEntry type="module" module-name="torchdiffeq" />
   </component>
   <component name="PackageRequirementsSettings">
     <option name="requirementsPath" value="" />

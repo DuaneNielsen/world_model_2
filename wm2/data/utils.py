@@ -9,7 +9,10 @@ class SARI:
     def __init__(self, state, action, reward, done, info):
         self.state = state
         self.action = action
-        self.reward = reward
+        if not isinstance(reward, np.ndarray):
+            self.reward = np.array([reward])
+        else:
+            self.reward = reward
         self.has_reward = reward != 0
         self.done = done
         self.info = info

@@ -18,6 +18,7 @@ from torch.utils.data import DataLoader, ConcatDataset
 from torch.distributions import Normal
 from torch.distributions.kl import kl_divergence
 import torch.nn.functional as F
+from torch.nn.utils import clip_grad_norm_
 import torch.backends.cudnn
 import torch.cuda
 import numpy as np
@@ -323,13 +324,15 @@ def main(args):
                 train = DataLoader(train, batch_size=args.batch_size * 40, collate_fn=pad_collate_2, shuffle=True)
 
                 for trajectory in train:
+                    L, N = trajectory.state.shape[0:2]
 
                     trajectory.state = trajectory.state.to(args.device)
                     trajectory.action = trajectory.action.to(args.device)
 
                     # anchor on the sampled trajectory
                     imagine = [torch.cat((trajectory.state, trajectory.action), dim=2)]
-                    reward = [R(trajectory.state)]
+                    #reward = [R(trajectory.state)]
+                    reward = [torch.zeros((L, N, 1), device=args.device)]
                     p_of_continuing = [pcont(trajectory.state)]
                     v = [value(trajectory.state)]
 
@@ -419,12 +422,12 @@ def main(args):
                         scr.update_table('VL', VL[:, 0, 0].detach().cpu().numpy())
 
 
-                    "backprop loss"
-                    policy_optim.zero_grad()#, value_optim.zero_grad()
-                    #T_optim.zero_grad(),  pcont_optim.zero_grad(), #R_optim.zero_grad(),
+                    "backprop loss through policy"
+                    policy_optim.zero_grad()
                     policy_loss = -VL.mean()
                     policy_loss.backward()
-                    #clip_grad_value_(policy.parameters(), 0.001)
+                    if args.policy_clip > 0.0:
+                        clip_grad_norm_(parameters=policy.parameters(), max_norm=args.policy_clip)
                     policy_optim.step()
 
                     "housekeeping"
@@ -435,14 +438,14 @@ def main(args):
 
                     " regress value against tau ie: the initial estimated value... "
                     value.train()
-                    value_optim.zero_grad() # policy_optim.zero_grad(),
-                    #T_optim.zero_grad(),  #pcont_optim.zero_grad(), #R_optim.zero_grad(),
+                    value_optim.zero_grad()
                     VN = VL.detach()
                     value_sample.append(VN.clone().detach().cpu().flatten().numpy())
                     values = value(trajectory.state)
                     value_loss = ((VN - values) ** 2).mean() / 2
                     value_loss.backward()
-                    #clip_grad_norm_(parameters=value.parameters(), max_norm=100.0)
+                    if args.value_clip > 0.0:
+                        clip_grad_norm_(parameters=value.parameters(), max_norm=args.value_clip)
                     value_optim.step()
                     value.eval()
 
@@ -631,10 +634,12 @@ defaults = {
     'pcont_terminal_repeats': 3,
 
     'value_lr': 2e-5,
+    'value_clip': 0.0,
     'value_hidden_dims': [300, 300],
     'value_nonlin': 'nn.ELU',
 
     'policy_lr': 2e-5,
+    'policy_clip': 0.0,
     'policy_hidden_dims': [48, 48],
     'policy_nonlin': 'nn.ELU',
 

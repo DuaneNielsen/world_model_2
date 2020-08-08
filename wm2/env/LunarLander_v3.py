@@ -60,6 +60,7 @@ SIDE_ENGINE_AWAY = 12.0
 
 VIEWPORT_W = 600
 VIEWPORT_H = 400
+eps = torch.finfo().eps
 
 
 class ContactDetector(contactListener):
@@ -83,9 +84,9 @@ class ContactDetector(contactListener):
 impact_k = 3.0
 dist_k = 3.0
 stablilty_k = 0.5
+stablity_damp = 0.4
 land_k = 10.0
-damp_k = 3.0
-
+damp_k = 1.0
 viz = True
 realtime = False
 
@@ -101,7 +102,7 @@ def simple_reward_f(state):
     dist = math.sqrt((x_pos - center[0]) ** 2 + (y_pos - center[1]) ** 2 + sys.float_info.epsilon)
     velocity = math.sqrt(x_velocity ** 2 + y_velocity ** 2 + sys.float_info.epsilon)
 
-    stable_r = - stablilty_k * abs(angle)
+    stable_r = - stablilty_k * abs(angle) - stablity_damp * abs(angle_velocity)
     dist_r = - dist_k * math.sqrt((x_pos - center[0]) ** 2 + (y_pos - center[1]) ** 2 + sys.float_info.epsilon)
     velocity_r = - damp_k * math.sqrt(x_velocity ** 2 + y_velocity ** 2 + sys.float_info.epsilon)
     reward = stable_r + dist_r + velocity_r
@@ -187,17 +188,6 @@ class VizPanel:
         self.fig.canvas.draw()
 
 
-"""
-(pos.x - VIEWPORT_W / SCALE / 2) / (VIEWPORT_W / SCALE / 2),
-(pos.y - (self.helipad_y + LEG_DOWN / SCALE)) / (VIEWPORT_H / SCALE / 2),
-vel.x * (VIEWPORT_W / SCALE / 2) / FPS,
-vel.y * (VIEWPORT_H / SCALE / 2) / FPS,
-self.lander.angle,
-20.0 * self.lander.angularVelocity / FPS,
-"""
-
-
-
 class SimpleReward(nn.Module):
     def __init__(self):
         super().__init__()
@@ -209,7 +199,7 @@ class SimpleReward(nn.Module):
         center = (0.0, 0.0)
         dist = torch.sqrt((x_pos - center[0]) ** 2 + (y_pos - center[1]) ** 2 + eps)
         velocity = torch.sqrt(x_velocity ** 2 + y_velocity ** 2 + eps)
-        reward = - dist_k * dist - damp_k * velocity - stablilty_k * torch.abs(angle)
+        reward = - dist_k * dist - damp_k * velocity - stablilty_k * torch.abs(angle) - stablity_damp * torch.abs(angle_velocity)
         reward = reward.unsqueeze(0)
         reward = torch.transpose(reward, 0, -1)
         return reward

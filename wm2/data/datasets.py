@@ -22,6 +22,15 @@ class DummyBuffer:
         pass
 
 
+class Trajectory:
+    def __init__(self, id, buffer):
+        self.id = id
+        self.b = buffer
+
+    def append(self, state, action, reward, done, info):
+        self.b.append(self.id, state, action, reward, done, info)
+
+
 class Buffer:
     def __init__(self, p_cont_algo='step', terminal_repeats=3):
         self.trajectories = []
@@ -31,6 +40,12 @@ class Buffer:
         self.steps_count = 0
         self.p_cont_algo = p_cont_algo
         self.horizon = terminal_repeats
+        self.nt = 0
+
+    def next_traj(self):
+        trajectory = Trajectory(self.nt, self)
+        self.nt += 1
+        return trajectory
 
     def append(self, traj_id, state, action, reward, done, info):
         """subclass and override this method to get different buffer write behavior"""
@@ -149,6 +164,7 @@ class SubsetSequenceBuffer:
 
     def __len__(self):
         return len(self.index)
+
 
 def mask_all(state, reward, action):
     return np.ones((len(state), 1), dtype=bool)
