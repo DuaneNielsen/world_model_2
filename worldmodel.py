@@ -138,7 +138,7 @@ def determinism(seed):
 
 def main(args):
     """ monitoring """
-    scr = DummyCurses()
+    scr = Curses()
     recent_reward = deque(maxlen=20)
     wandb.gym.monitor()
     imagine_log_cooldown = wm2.utils.Cooldown(secs=args.viz_imagine_log_cooldown)
@@ -224,9 +224,6 @@ def main(args):
                     loss = ((pred_y - trajectory) ** 2 * loss_mask).mean()
                     loss.backward()
                     T_optim.step()
-
-                    """ plot """
-                    print(loss.item())
 
             def train_dynamics():
                 """ train the dynamics model """

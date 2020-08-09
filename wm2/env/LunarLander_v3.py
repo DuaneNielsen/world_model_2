@@ -136,59 +136,6 @@ def reward_f(state):
     return reward, stable, dist, height, stable_r, dist_r, impact_r, in_x, in_y, land_r
 
 
-def state_dict(state):
-    x_pos, y_pos, x_velocity, y_velocity, angle, angle_velocity = state[0:6]
-    return {'x_pos': x_pos,
-            'y_pos': y_pos,
-            'x_velocity': x_velocity,
-            'y_velocity': y_velocity,
-            'angle': angle,
-            'angle_velocity': angle_velocity
-            }
-
-
-class VizPanel:
-    def __init__(self):
-        plt.ion()
-        self.fig = plt.figure(figsize=(24, 16), dpi=80, facecolor='w', edgecolor='k', )
-        self.fig.canvas.set_window_title('Lander Viz')
-        self.current_panel = 1
-        self.panels = (5, 3)
-        self.panels_array = {}
-
-        self.add_panel('x_pos')
-        self.add_panel('y_pos')
-        self.add_panel('x_velocity')
-        self.add_panel('y_velocity')
-        self.add_panel('angle')
-        self.add_panel('angle_velocity')
-        self.add_panel('stable')
-        self.add_panel('dist')
-        self.add_panel('velocity')
-
-    def add_panel(self, label):
-        self.panels_array.update({label: LiveLine(self.fig, self.panels, self._next_panel, label=label)})
-
-    @property
-    def _next_panel(self):
-        current_panel = self.current_panel
-        self.current_panel += 1
-        return current_panel
-
-    def reset(self):
-        for key in self.panels_array:
-            self.panels_array[key].reset()
-
-    def update(self, info):
-        for key in info:
-            self.panels_array[key].dq.append(info[key])
-
-    def draw(self):
-        for key in self.panels_array:
-            self.panels_array[key].draw()
-        self.fig.canvas.draw()
-
-
 class SimpleReward(nn.Module):
     def __init__(self):
         super().__init__()
@@ -267,9 +214,6 @@ class LunarLander(gym.Env, EzPickle):
         else:
             # Nop, fire left engine, main engine, right engine
             self.action_space = spaces.Discrete(4)
-
-        if viz:
-            self.viz = VizPanel()
 
         self.reset()
 
@@ -382,10 +326,6 @@ class LunarLander(gym.Env, EzPickle):
 
         self.drawlist = [self.lander] + self.legs
         state = self.step(np.array([0, 0]) if self.continuous else 0)[0]
-
-        if viz:
-            self.viz.reset()
-            self.viz.update(state_dict(state))
 
         return state
 
@@ -516,15 +456,6 @@ class LunarLander(gym.Env, EzPickle):
 
         state = np.array(state, dtype=np.float32)
         reward, info = simple_reward_f(state)
-        info = dict(info, **state_dict(state))
-
-        if viz:
-            self.viz.update(info)
-            if realtime:
-                self.viz.draw()
-            elif done:
-                self.viz.draw()
-
         return state, reward, done, info
 
     def render(self, mode='human'):
