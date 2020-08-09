@@ -37,6 +37,7 @@ from wm2.viz import LiveLine
 import torch
 from torch import nn as nn
 from torch.nn import functional as F
+from wm2.models.models import ForcedDynamics
 
 FPS = 50
 SCALE = 30.0  # affects how fast-paced the game is, forces should be adjusted as well
@@ -707,6 +708,29 @@ class LunarLanderConnector(EnvConnector):
         i = np.random.choice(r.shape[0], less_than_0_3.sum(), p=p)
         less_than_0_3[i] = True
         return less_than_0_3[:, np.newaxis]
+
+
+class PhysicsStateOnly(gym.ObservationWrapper):
+    def observation(self, observation):
+        return observation[0:6]
+
+
+class LunarLanderODEConnector(LunarLanderConnector):
+    def __init__(self, **kwargs):
+        super().__init__()
+
+    @staticmethod
+    def make_transition_model(args):
+        T = ForcedDynamics(state_size=args.state_dims, action_size=args.action_dims, nhidden=512)
+        return T
+
+    def make_env(self, args):
+        # environment
+        env = gym.make(args.env)
+        env = PhysicsStateOnly(env)
+        env.observation_space = gym.spaces.Box(-np.inf, +np.inf, (6,))
+        self.set_env_dims(args, env)
+        return env
 
 
 if __name__ == '__main__':

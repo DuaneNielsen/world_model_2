@@ -17,7 +17,6 @@ import pygame
 import keypoints
 from keypoints.models import transporter
 import config
-from utils import UniImageViewer
 import torch
 from pyrr import matrix44, Vector3
 from math import floor
@@ -50,7 +49,7 @@ from torch.distributions import Categorical
 #     return a, kp
 
 
-viewer = UniImageViewer()
+#viewer = UniImageViewer()
 
 pygame.init()
 

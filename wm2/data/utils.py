@@ -166,6 +166,51 @@ def pad_tensor(lengths):
     return pad
 
 
+class Collate:
+    """configurable version of pad_collate_2"""
+    def __init__(self, pad_mode='zero'):
+        """
+
+        :param pad_mode: zero: pads with zeros
+                         terminal_state: pads all with the terminal state
+        """
+        self.pad_mode = pad_mode
+
+    def __call__(self, batch):
+        """
+        returns batch in [T, B, D] format (timesteps, Batch, dimensions)
+        :param batch: a list of dictionaries containing numpy arrays of [T, D]
+        :return: [T, B, D] formatted batch, zero padded at the sequence ends
+        """
+
+        lengths = [trajectory['state'].shape[0] for trajectory in batch]
+        T, B = max(lengths), len(batch)
+
+        shape = {}
+        dtype = {}
+        keys = [k for k in batch[0]]
+
+        # initialize parameters
+        for key in keys:
+            shape[key] = batch[0][key].shape[1]
+
+        data = {}
+
+        # initialize zero tensors
+        for key in keys:
+            data[key] = torch.zeros(T, B, shape[key])
+
+        # copy the data
+        for i, (trajectory, length) in enumerate(zip(batch, lengths)):
+            for key in trajectory:
+                data[key][torch.arange(0, length), i] = torch.from_numpy(trajectory[key].astype(np.float32))
+
+        # add indicators for the padding, can be used as a loss mask
+        data['pad'] = pad_tensor(lengths)
+
+        return TensorNamespace(**data)
+
+
 def pad_collate_2(batch):
     """
     returns batch in [T, B, D] format (timesteps, Batch, dimensions)

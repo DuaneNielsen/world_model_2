@@ -11,6 +11,7 @@ from math import floor
 import cv2
 import numpy as np
 import torch
+from torchdiffeq import odeint_adjoint as odeint
 
 from wm2.functional import multivariate_diag_gaussian, multivariate_gaussian
 
@@ -421,9 +422,23 @@ class Viz:
             N, S = s.size()
 
             pc = pcont(s).squeeze().cpu().numpy()
-            sa = torch.cat((s, a), dim=1)
-            pred_next_dist, hx = T(sa.unsqueeze(1))
-            next_state = pred_next_dist.loc.reshape(N, S)
+
+            def next_state_lstm(s, a):
+                sa = torch.cat((s, a), dim=1)
+                pred_next_dist, hx = T(sa.unsqueeze(1))
+                next_state = pred_next_dist.loc.reshape(N, S)
+                return next_state
+
+            def next_state_ode(s, a):
+                t = torch.linspace(0, 1, 2)
+                T.mode = 'learn_dynamics'
+                T.h = torch.stack([a, a])
+                predicted_trajectory = odeint(T, s, t)
+                return predicted_trajectory[1:]
+
+            #next_state = next_state_lstm(s, a)
+
+            next_state = next_state_ode(s, a)
             pr_next = R(next_state).squeeze().cpu().numpy()
             pr = R(s).squeeze().cpu().numpy()
 
@@ -442,7 +457,7 @@ class Viz:
             self.live_reward.update(pr * pc)
 
             self.update_episode_value(value, s)
-            self.update_episode_dynamics(T, s, a)
+            #self.update_episode_dynamics(T, s, a)
             self.update_policy_entropy(entropy)
             self.fig.canvas.draw()
 

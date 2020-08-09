@@ -26,6 +26,7 @@ import warnings
 import wandb
 import gym
 import gym.wrappers
+from torchdiffeq import odeint_adjoint as odeint
 
 from models.models import MLP, SoftplusMLP, Policy, StochasticTransitionModel
 from wm2.viz import Viz, DummyCurses
@@ -59,7 +60,7 @@ def log_prob_loss(trajectories, predicted_state):
 def log_prob_loss_entropy(trajectories, predicted_state):
     prior = Normal(predicted_state.loc[0:-1], predicted_state.scale[0:-1])
     posterior = Normal(predicted_state.loc[1:], predicted_state.scale[1:])
-    #div = kl_divergence(prior, posterior).mean()
+    # div = kl_divergence(prior, posterior).mean()
     log_p = predicted_state.log_prob(trajectories.next_state.to(args.device)).mean()
     entropy = posterior.entropy().mean()
     return - log_p - entropy
@@ -97,7 +98,7 @@ def gather_experience(buff, episode, env, connector, policy, eps=0.0, expln_nois
             if render:
                 env.render()
                 time.sleep(delay)
-                #print(reward, state[-2], state[-3])
+                # print(reward, state[-2], state[-3])
             return action, action_dist
 
         action, action_dist = get_action(state, reward, done)
@@ -136,7 +137,6 @@ def determinism(seed):
 
 
 def main(args):
-
     """ monitoring """
     scr = DummyCurses()
     recent_reward = deque(maxlen=20)
@@ -174,6 +174,7 @@ def main(args):
     T = connector.make_transition_model(args).to(args.device)
     if args.dynamics_learnable:
         T_optim = Adam(T.parameters(), lr=args.dynamics_lr)
+    T.policy = policy
     t_criterion = log_prob_loss
 
     """ reward function or model"""
@@ -206,6 +207,27 @@ def main(args):
             scr.update_slot('buffer_stats',
                             f'train_buff size {len(sample_train_buff)} rejects {sample_train_buff.rejects}')
 
+            def train_ode_dynamics():
+
+                train = SARDataset(sample_train_buff, mask_f=None)
+                train = DataLoader(train, batch_size=args.batch_size, collate_fn=pad_collate_2, shuffle=True)
+                T.mode = 'learn_dynamics'
+
+                for trajectories in train:
+                    T.h = trajectories.action.to(args.device)
+                    t = torch.linspace(0, len(trajectories.state) - 2, len(trajectories.state) - 1, device=args.device)
+                    y0, trajectory, loss_mask = trajectories.state[0].to(args.device), \
+                                                trajectories.state[1:].to(args.device), \
+                                                trajectories.pad[1:].to(args.device)
+                    T_optim.zero_grad()
+                    pred_y = odeint(T, y0, t, method=args.dynamics_ode_method)
+                    loss = ((pred_y - trajectory) ** 2 * loss_mask).mean()
+                    loss.backward()
+                    T_optim.step()
+
+                    """ plot """
+                    print(loss.item())
+
             def train_dynamics():
                 """ train the dynamics model """
                 train, test = SARNextDataset(sample_train_buff, mask_f=None), SARNextDataset(sample_test_buff,
@@ -223,7 +245,7 @@ def main(args):
                     predicted_state, h = T(input)
                     loss = t_criterion(trajectories, predicted_state)
                     loss.backward()
-                    #clip_grad_norm_(parameters=T.parameters(), max_norm=100.0)
+                    # clip_grad_norm_(parameters=T.parameters(), max_norm=100.0)
                     T_optim.step()
                     scr.update_slot('transition_train', f'Transition training loss {loss.item()}')
                     wandb.log({'transition_train': loss.item()})
@@ -315,7 +337,7 @@ def main(args):
 
             def train_behavior():
 
-                #logging
+                # logging
                 update_text = imagine_log_cooldown()
                 value_sample = deque(maxlen=100)
 
@@ -329,26 +351,8 @@ def main(args):
                     trajectory.state = trajectory.state.to(args.device)
                     trajectory.action = trajectory.action.to(args.device)
 
-                    # anchor on the sampled trajectory
-                    imagine = [torch.cat((trajectory.state, trajectory.action), dim=2)]
-                    #reward = [R(trajectory.state)]
-                    reward = [torch.zeros((L, N, 1), device=args.device)]
-                    p_of_continuing = [pcont(trajectory.state)]
-                    v = [value(trajectory.state)]
+                    pcontstack, rstack, vstack = imagine_forward_ode(N, L, trajectory)
 
-                    # imagine forward here
-                    for tau in range(args.horizon):
-                        state, h = T(imagine[tau])
-                        if isinstance(state, torch.distributions.Distribution):
-                            state = state.rsample()
-                        action = policy(state).rsample()
-                        reward += [R(state)]
-                        p_of_continuing += [pcont(state)]
-                        v += [value(state)]
-                        imagine += [torch.cat((state, action), dim=2)]
-
-                    # VR = torch.mean(torch.stack(reward), dim=0)
-                    rstack, vstack, pcontstack = torch.stack(reward), torch.stack(v), torch.stack(p_of_continuing)
                     vstack = vstack * pcontstack
                     rstack = rstack * pcontstack
                     H, L, N, S = rstack.shape
@@ -384,8 +388,8 @@ def main(args):
                         scr.update_table('rewards', rewards)
                         v = vstack[:, 0, 0, 0].unsqueeze(0).detach().cpu().numpy()
                         scr.update_table('values', v)
-                        #imagined_trajectory = torch.stack(imagine)[:, 0, 0, :].detach().cpu().numpy().T
-                        #scr.update_table('imagined trajectory', imagined_trajectory)
+                        # imagined_trajectory = torch.stack(imagine)[:, 0, 0, :].detach().cpu().numpy().T
+                        # scr.update_table('imagined trajectory', imagined_trajectory)
 
                     """ reduce the above matrix to values using the formula from the paper in 2 steps
                     first, compute VN for each k by applying discounts to each time-step and compute the expected value
@@ -420,7 +424,6 @@ def main(args):
                     VL = (VNK * lam).sum(0)
                     if update_text:
                         scr.update_table('VL', VL[:, 0, 0].detach().cpu().numpy())
-
 
                     "backprop loss through policy"
                     policy_optim.zero_grad()
@@ -458,8 +461,47 @@ def main(args):
                     if update_text:
                         viz.update_sampled_values(value_sample)
 
+            def imagine_forward(N, L, trajectory):
+                # anchor on the sampled trajectory
+                imagine = [torch.cat((trajectory.state, trajectory.action), dim=2)]
+                # reward = [R(trajectory.state)]
+                reward = [torch.zeros((L, N, 1), device=args.device)]
+                p_of_continuing = [pcont(trajectory.state)]
+                v = [value(trajectory.state)]
+                # imagine forward here
+                for tau in range(args.horizon):
+                    state, h = T(imagine[tau])
+                    if isinstance(state, torch.distributions.Distribution):
+                        state = state.rsample()
+                    action = policy(state).rsample()
+                    reward += [R(state)]
+                    p_of_continuing += [pcont(state)]
+                    v += [value(state)]
+                    imagine += [torch.cat((state, action), dim=2)]
+                # VR = torch.mean(torch.stack(reward), dim=0)
+                rstack, vstack, pcontstack = torch.stack(reward), torch.stack(v), torch.stack(p_of_continuing)
+                return pcontstack, rstack, vstack
+
+            def imagine_forward_ode(N, L, trajectory):
+                """
+                predicts args.horizon steps ahead using T and initial conditions sampled from exp buffer
+                :param N: Batch size
+                :param L: Length of trajectories
+                :param trajectory: sampled trajectories
+                :return: prob of continuing, reward and value of dimension H, L, N, 1
+                """
+                s0 = trajectory.state.reshape(N*L, -1)
+                t = torch.linspace(0, args.horizon-1, args.horizon)
+                T.mode = 'use_policy'
+                prediction = odeint(T, s0, t, method=args.dynamics_ode_method)
+                prediction = prediction.reshape(args.horizon, L, N, -1)
+                r = R(prediction)
+                v = value(prediction)
+                p = pcont(prediction)
+                return p, r, v
+
             if args.dynamics_learnable:
-                train_dynamics()
+                train_ode_dynamics()
             if args.reward_learnable:
                 train_reward()
             if not args.pcont_fixed_length:
@@ -469,8 +511,8 @@ def main(args):
 
         "run the policy on the environment and collect experience"
         train_buff, reward, entropy = gather_experience(train_buff, train_episode, env, connector, policy,
-                                               eps=0.0, seed=args.seed,
-                                               render=render_cooldown(), expln_noise=args.exploration_noise)
+                                                        eps=0.0, seed=args.seed,
+                                                        render=render_cooldown(), expln_noise=args.exploration_noise)
         if episode_refresh():
             viz.update_trajectory_plots(value, R, pcont, T, train_buff, train_episode, entropy)
 
@@ -494,8 +536,8 @@ def main(args):
 
             for _ in range(args.best_policy_sample_n):
                 dummy_buffer, reward, entropy = gather_experience(dummy_buffer, train_episode, env, connector, policy,
-                                                       eps=0.0,
-                                                       expln_noise=0.0, seed=args.seed)
+                                                                  eps=0.0,
+                                                                  expln_noise=0.0, seed=args.seed)
                 sampled_rewards.append(sum(reward))
             if mean(sampled_rewards) > best_stats['mean']:
                 best_stats['mean'] = mean(sampled_rewards)
@@ -510,13 +552,13 @@ def main(args):
                 policy_saver.save(policy, 'best', **best_stats)
 
         test_buff, reward, entropy = gather_experience(test_buff, test_episode, env, connector, policy,
-                                              eps=0.0,
-                                              render=False, expln_noise=args.exploration_noise, seed=args.seed)
+                                                       eps=0.0,
+                                                       render=False, expln_noise=args.exploration_noise, seed=args.seed)
         test_episode += 1
 
         if viz_cooldown():
             viz.plot_rewards_histogram(train_buff, R)
-            viz.update_dynamics(test_buff, T)
+            #viz.update_dynamics(test_buff, T)
             viz.update_pcont(test_buff, pcont)
             viz.update_value(test_buff, value)
             env_viz.update(args, test_buff, policy, R, value, T, pcont)
@@ -525,7 +567,6 @@ def main(args):
 
 
 def demo(dir, env, connector, n=100):
-
     args.state_dims = env.observation_space.shape[0]
     args.action_dims = env.action_space.shape[0]
     args.action_min = -1.0
@@ -548,8 +589,8 @@ def demo(dir, env, connector, n=100):
         print(msg)
         policy.load_state_dict(load_dict['model'])
         train_buff, reward, entropy = gather_experience(dummy_buffer, 0, env, connector, policy,
-                                               eps=0.0,
-                                               render=True, delay=1.0 / args.fps)
+                                                        eps=0.0,
+                                                        render=True, delay=1.0 / args.fps)
         iterations += 1
 
 
@@ -625,6 +666,7 @@ defaults = {
     'dynamics_hidden_dim': 300,
     'dynamics_reg': 0.5,
     'dynamics_dropout': 0.0,
+    'dynamics_ode_method': 'rk4',
 
     'pcont_fixed_length': False,
     'pcont_lr': 1e-4,

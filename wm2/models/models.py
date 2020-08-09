@@ -155,3 +155,51 @@ class GRU(nn.Module):
         mu, sig = hidden.chunk(2, dim=2)
         mu, sig = self.mu(mu), self.sig(sig) + 0.1
         return Normal(mu, sig), hidden
+
+
+class Dynamics(nn.Module):
+    def __init__(self, state_size=6, action_size=2, nhidden=512):
+        super().__init__()
+        self.elu = nn.ELU(inplace=True)
+        self.fc1 = nn.Linear(state_size + action_size, nhidden)
+        self.fc2 = nn.Linear(nhidden, nhidden)
+        self.fc3 = nn.Linear(nhidden, state_size, bias=False)
+        torch.nn.init.zeros_(self.fc3.weight.data)
+
+    def forward(self, controlled):
+        hidden = self.fc1(controlled)
+        hidden = self.elu(hidden)
+        hidden = self.fc2(hidden)
+        hidden = self.elu(hidden)
+        dstate = self.fc3(hidden)
+        return dstate
+
+
+class ForcedDynamics(nn.Module):
+    """
+    in learn_dynamics mode, set h to be the trajectory of actions taken, shape L, N, A
+    L = length of trajectory, N is batch size, A is action space dimensions
+    """
+
+    def __init__(self, state_size=6, action_size=2, nhidden=512):
+        super().__init__()
+        self.dynamics = Dynamics(state_size=state_size, action_size=action_size, nhidden=nhidden)
+        self.nfe = 0
+        self.policy = None
+        self.mode = 'learn_dynamics'
+        self.h = None
+
+    def forward(self, t, state):
+
+        self.nfe += 1
+
+        if self.mode == 'learn_dynamics':
+            index = torch.floor(t).long()
+            index = index.clamp(0, self.h.shape[0] - 1)
+            actions = self.h[index]
+        else:
+            actions = self.policy(state).rsample()
+
+        controlled = torch.cat([state, actions], dim=1)
+        dstate = self.dynamics(controlled)
+        return dstate
