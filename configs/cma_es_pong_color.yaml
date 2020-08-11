@@ -1,0 +1,33 @@
+checkpoint_freq: 1
+cma_algo: fast
+cma_workers: 7
+cma_oversample: 1024
+cma_policy_features: 9
+cma_policy_depth: 1
+gym_reward_count_limit: 5
+
+transporter_model_type: VGG_PONG_LAYERNECK
+transporter_model_in_channels: 3
+transporter_model_z_channels : 16
+transporter_model_keypoints : 3
+transporter_model_load: /home/duane/keypoints/data/models/transporter/VGG_PONG_LAYERNECK/run_40/best/
+
+iic:
+  model:
+    name: VGG_MINI
+    type: vgg16
+    encoder: [3, 64, 128 'M', 256, 'M', 512,'M', 512, 'M']
+    init: xavier_normal
+    load: /home/duane/PycharmProjects/iic/data/models/classifiers/pong-v1/VGG_MINI/run_170/checkpoint_amp.pt
+    categories: 6
+    labels: ['player', 'empty', 'enemy', 'enemy', 'puck', 'enemy']
+
+dataset: pong_color
+dataset_train_len: 20000
+dataset_test_len: 2100
+dataset_randomize: True
+data_aug_type: None
+
+batch_size: 32
+epochs: 60
+opt_level: O2
