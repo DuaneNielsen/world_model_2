@@ -12,25 +12,18 @@ import types
 import importlib
 
 import torch
-import torch.nn as nn
 from torch.optim import Adam
 from torch.utils.data import DataLoader, ConcatDataset
 from torch.distributions import Normal
-from torch.distributions.kl import kl_divergence
-import torch.nn.functional as F
 from torch.nn.utils import clip_grad_norm_
 import torch.backends.cudnn
 import torch.cuda
 import numpy as np
 import warnings
 import wandb
-import gym
-import gym.wrappers
-from torchdiffeq import odeint_adjoint as odeint
 
-from models.models import MLP, SoftplusMLP, Policy, StochasticTransitionModel
+from models.models import Policy
 from wm2.viz import Viz, DummyCurses
-from wm2.viz import Curses
 from wm2.data.datasets import Buffer, SARDataset, SARNextDataset, SimpleRewardDataset, DummyBuffer, \
     SubsetSequenceBuffer
 from wm2.utils import Pbar
@@ -47,14 +40,6 @@ def mse_loss(trajectories, predicted_state):
 
 def log_prob_loss_simple(trajectories, predicted_state):
     return - predicted_state.log_prob(trajectories.next_state.to(args.device)).mean()
-
-
-def log_prob_loss(trajectories, predicted_state):
-    prior = Normal(predicted_state.loc[0:-1], predicted_state.scale[0:-1])
-    posterior = Normal(predicted_state.loc[1:], predicted_state.scale[1:])
-    div = kl_divergence(prior, posterior).mean()
-    log_p = predicted_state.log_prob(trajectories.next_state.to(args.device)).mean()
-    return div * args.dynamics_reg - log_p
 
 
 def log_prob_loss_entropy(trajectories, predicted_state):
@@ -138,7 +123,7 @@ def determinism(seed):
 
 def main(args):
     """ monitoring """
-    scr = Curses()
+    scr = DummyCurses()
     recent_reward = deque(maxlen=20)
     wandb.gym.monitor()
     imagine_log_cooldown = wm2.utils.Cooldown(secs=args.viz_imagine_log_cooldown)
@@ -172,21 +157,16 @@ def main(args):
 
     """ dynamics function or model"""
     T = connector.make_transition_model(args).to(args.device)
-    if args.dynamics_learnable:
-        T_optim = Adam(T.parameters(), lr=args.dynamics_lr)
-    T.policy = policy
-    t_criterion = log_prob_loss
+    T_optim = Adam(T.parameters(), lr=args.dynamics_lr) if args.dynamics_learnable else None
 
     """ reward function or model"""
     R = connector.make_reward_model(args).to(args.device)
-    if args.reward_learnable:
-        R_optim = Adam(R.parameters(), lr=args.reward_lr)
+    R_optim = Adam(R.parameters(), lr=args.reward_lr) if args.reward_learnable else None
 
     "save and restore helpers"
     R_saver = wm2.utils.SaveLoad('reward')
     policy_saver = wm2.utils.SaveLoad('policy')
     value_saver = wm2.utils.SaveLoad('value')
-    T_saver = wm2.utils.SaveLoad('T')
     pcont_saver = wm2.utils.SaveLoad('pcont')
 
     converged = False
@@ -206,57 +186,6 @@ def main(args):
             scr.update_slot('wandb', f'{wandb.run.name} {wandb.run.project} {wandb.run.id}')
             scr.update_slot('buffer_stats',
                             f'train_buff size {len(sample_train_buff)} rejects {sample_train_buff.rejects}')
-
-            def train_ode_dynamics():
-
-                train = SARDataset(sample_train_buff, mask_f=None)
-                train = DataLoader(train, batch_size=args.batch_size, collate_fn=pad_collate_2, shuffle=True)
-                T.mode = 'learn_dynamics'
-
-                for trajectories in train:
-                    T.h = trajectories.action.to(args.device)
-                    t = torch.linspace(0, len(trajectories.state) - 2, len(trajectories.state) - 1, device=args.device)
-                    y0, trajectory, loss_mask = trajectories.state[0].to(args.device), \
-                                                trajectories.state[1:].to(args.device), \
-                                                trajectories.pad[1:].to(args.device)
-                    T_optim.zero_grad()
-                    pred_y = odeint(T, y0, t, method=args.dynamics_ode_method)
-                    loss = ((pred_y - trajectory) ** 2 * loss_mask).mean()
-                    loss.backward()
-                    T_optim.step()
-
-            def train_dynamics():
-                """ train the dynamics model """
-                train, test = SARNextDataset(sample_train_buff, mask_f=None), SARNextDataset(sample_test_buff,
-                                                                                             mask_f=None)
-                train = DataLoader(train, batch_size=args.batch_size, collate_fn=pad_collate_2, shuffle=True)
-                test = DataLoader(test, batch_size=args.batch_size, collate_fn=pad_collate_2, shuffle=True)
-
-                if hasattr(T, 'dropout'):
-                    T.dropout_on()
-
-                # train transition model
-                for trajectories in train:
-                    input = torch.cat((trajectories.state, trajectories.action), dim=2).to(args.device)
-                    T_optim.zero_grad()
-                    predicted_state, h = T(input)
-                    loss = t_criterion(trajectories, predicted_state)
-                    loss.backward()
-                    # clip_grad_norm_(parameters=T.parameters(), max_norm=100.0)
-                    T_optim.step()
-                    scr.update_slot('transition_train', f'Transition training loss {loss.item()}')
-                    wandb.log({'transition_train': loss.item()})
-                    T_saver.checkpoint(T, T_optim)
-
-                if hasattr(T, 'dropout'):
-                    T.dropout_off()
-
-                # for trajectories in test:
-                #     input = torch.cat((trajectories.state, trajectories.action), dim=2).to(args.device)
-                #     predicted_state, h = T(input)
-                #     loss = t_criterion(trajectories, predicted_state)
-                #     scr.update_slot('transition_test', f'Transition test loss  {loss.item()}')
-                #     wandb.log({'transition_test': loss.item()})
 
             def train_reward():
                 """ train the reward model
@@ -343,12 +272,14 @@ def main(args):
                 train = DataLoader(train, batch_size=args.batch_size * 40, collate_fn=pad_collate_2, shuffle=True)
 
                 for trajectory in train:
-                    L, N = trajectory.state.shape[0:2]
-
                     trajectory.state = trajectory.state.to(args.device)
                     trajectory.action = trajectory.action.to(args.device)
 
-                    pcontstack, rstack, vstack = imagine_forward_ode(N, L, trajectory)
+                    prediction = T.imagine(args, trajectory, policy)
+
+                    rstack = R(prediction)
+                    vstack = value(prediction)
+                    pcontstack = pcont(prediction)
 
                     vstack = vstack * pcontstack
                     rstack = rstack * pcontstack
@@ -458,47 +389,8 @@ def main(args):
                     if update_text:
                         viz.update_sampled_values(value_sample)
 
-            def imagine_forward(N, L, trajectory):
-                # anchor on the sampled trajectory
-                imagine = [torch.cat((trajectory.state, trajectory.action), dim=2)]
-                # reward = [R(trajectory.state)]
-                reward = [torch.zeros((L, N, 1), device=args.device)]
-                p_of_continuing = [pcont(trajectory.state)]
-                v = [value(trajectory.state)]
-                # imagine forward here
-                for tau in range(args.horizon):
-                    state, h = T(imagine[tau])
-                    if isinstance(state, torch.distributions.Distribution):
-                        state = state.rsample()
-                    action = policy(state).rsample()
-                    reward += [R(state)]
-                    p_of_continuing += [pcont(state)]
-                    v += [value(state)]
-                    imagine += [torch.cat((state, action), dim=2)]
-                # VR = torch.mean(torch.stack(reward), dim=0)
-                rstack, vstack, pcontstack = torch.stack(reward), torch.stack(v), torch.stack(p_of_continuing)
-                return pcontstack, rstack, vstack
-
-            def imagine_forward_ode(N, L, trajectory):
-                """
-                predicts args.horizon steps ahead using T and initial conditions sampled from exp buffer
-                :param N: Batch size
-                :param L: Length of trajectories
-                :param trajectory: sampled trajectories
-                :return: prob of continuing, reward and value of dimension H, L, N, 1
-                """
-                s0 = trajectory.state.reshape(N*L, -1)
-                t = torch.linspace(0, args.horizon-1, args.horizon)
-                T.mode = 'use_policy'
-                prediction = odeint(T, s0, t, method=args.dynamics_ode_method)
-                prediction = prediction.reshape(args.horizon, L, N, -1)
-                r = R(prediction)
-                v = value(prediction)
-                p = pcont(prediction)
-                return p, r, v
-
             if args.dynamics_learnable:
-                train_ode_dynamics()
+                T.learn(args, sample_train_buff, T_optim)
             if args.reward_learnable:
                 train_reward()
             if not args.pcont_fixed_length:
@@ -510,8 +402,8 @@ def main(args):
         train_buff, reward, entropy = gather_experience(train_buff, train_episode, env, connector, policy,
                                                         eps=0.0, seed=args.seed,
                                                         render=render_cooldown(), expln_noise=args.exploration_noise)
-        if episode_refresh():
-            viz.update_trajectory_plots(value, R, pcont, T, train_buff, train_episode, entropy)
+        # if episode_refresh():
+        #     viz.update_trajectory_plots(value, R, pcont, T, train_buff, train_episode, entropy)
 
         train_episode += 1
 

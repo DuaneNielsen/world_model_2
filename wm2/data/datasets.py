@@ -32,6 +32,29 @@ class Trajectory:
 
 
 class Buffer:
+    """
+    Buffer stores trajectories as a sequence of steps in a list, ie
+
+    [[step0],[step1],[step2]], [[step0],[step1],[step2],[step3]], ...
+
+    buffer keeps an index for every step, so the index for above
+
+    [(0,0), (0, 1), (0,2), (1,0), (1,1), (1,2), (1, 3)]
+
+    to retrieve a trajectory
+
+    self.trajectory[trajectory_id]
+
+    to retrieve a step given an index
+
+    trajectory_id, step_id = self.step[step_index]
+    self.trajectory[trajectory_id][step_id]
+
+    total steps in the buffer is just len(buffer)
+    which is simply len(self.index)
+
+    """
+
     def __init__(self, p_cont_algo='step', terminal_repeats=3):
         self.trajectories = []
         self.index = []
@@ -132,26 +155,27 @@ class Buffer:
 
 class SubsetSequenceBuffer:
     def __init__(self, b, num_trajectories, length):
+        """
+
+        :param b: the buffer to sample sequences from
+        :param num_trajectories: the number of trajectories to sample
+        :param length: the length of the sequences to sample
+        """
         rnd = np.random.RandomState()
         self.trajectories = []
         self.rejects = 0
         while len(self.trajectories) < num_trajectories:
+            """ choose a trajectory """
             for i in rnd.choice(len(b), 1):
                 trajectory = b.trajectories[i]
-                padding = length - len(trajectory)
-                if padding > 0:
-                    pad = SARI(np.zeros_like(trajectory[0].state),
-                               np.zeros_like(trajectory[0].action),
-                               np.zeros_like(trajectory[0].reward), True, None)
-                    trajectory = padding*[pad] + trajectory
                 available = len(trajectory) - length + 1
-                start = rnd.randint(0, available)
+                """ pick a subsequence in the trajectory """
+                if available > 0:
+                    start = rnd.randint(0, available)
+                else:
+                    """  if the there are not enough steps, then just return the full trajectory  """
+                    start, length = 0, len(trajectory)
                 self.trajectories.append(b.trajectories[i][start:start+length])
-
-                # if available < 1:
-                #     self.rejects += 1
-                #     continue
-                # else:
 
         self.index = []
         for i, t in enumerate(self.trajectories):
@@ -242,11 +266,14 @@ class SARNextDataset(Dataset):
 
 
 class SARNextSubSequenceDataset(Dataset):
-    def __init__(self, buffer, mask_f=None):
+    """
+    write some documentation on this
+    """
+    def __init__(self, buffer, length, mask_f=None):
         super().__init__()
         self.b = buffer
         self.mask_f = mask_f if mask_f is not None else mask_all
-        self.length = 15
+        self.length = length
         self.index = self.b.subsequence_index(self.length)
 
     def __len__(self):

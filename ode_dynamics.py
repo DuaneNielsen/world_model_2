@@ -111,7 +111,7 @@ if __name__ == '__main__':
     panels = [fig.add_subplot(6, 2, i, ) for i in range(1, 9)]
     state_panel_name = ['x', 'y', 'dx', 'dy', 'theta', 'omega', 'leg1', 'leg2', 's_power', 'm_power']
     action_panel_name = ['side thruster', 'main thruster']
-    fig.canvas.set_window_title('Learning from FC network only')
+    fig.canvas.set_window_title('Dynamics Training')
     cooldown = Cooldown(secs=5)
 
     """ data """

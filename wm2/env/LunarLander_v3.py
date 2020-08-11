@@ -27,17 +27,19 @@ from Box2D import b2FixtureDef as fixtureDef
 from Box2D import b2PolygonShape as polygonShape
 from Box2D import b2RevoluteJointDef as revoluteJointDef
 from Box2D import b2ContactListener as contactListener
+from Box2D import b2RayCastCallback as rayCastCallback
 
 import gym
 from gym import spaces
 from gym.utils import seeding, EzPickle
-from wm2.env.connector import EnvConnector, EnvViz
+from wm2.env.connector import EnvConnector, EnvViz, ODEEnvConnector
 from matplotlib import pyplot as plt
 from wm2.viz import LiveLine
 import torch
 from torch import nn as nn
 from torch.nn import functional as F
 from wm2.models.models import ForcedDynamics
+from wm2.env.gym_viz import VizWrapper
 
 FPS = 50
 SCALE = 30.0  # affects how fast-paced the game is, forces should be adjusted as well
@@ -62,6 +64,19 @@ SIDE_ENGINE_AWAY = 12.0
 VIEWPORT_W = 600
 VIEWPORT_H = 400
 eps = torch.finfo().eps
+
+
+class GroundRadar(rayCastCallback):
+    def __init__(self, env):
+        super().__init__()
+        self.env = env
+
+    def ReportFixture(self, fixture, point, normal, fraction):
+        if (fixture.filterData.categoryBits & 1) == 0:
+          return 1
+        self.p2 = point
+        self.fraction = fraction
+        return 0
 
 
 class ContactDetector(contactListener):
@@ -621,6 +636,15 @@ class LunarLanderConnector(EnvConnector):
     def __init__(self, **kwargs):
         super().__init__()
 
+    def make_env(self, args):
+        # environment
+        env = gym.make(args.env)
+        env = VizWrapper(env)
+        env = PhysicsStateOnly(env)
+        env.observation_space = gym.spaces.Box(-np.inf, +np.inf, (6,))
+        self.set_env_dims(args, env)
+        return env
+
     @staticmethod
     def make_reward_model(args):
         return SimpleReward()
@@ -646,18 +670,18 @@ class PhysicsStateOnly(gym.ObservationWrapper):
         return observation[0:6]
 
 
-class LunarLanderODEConnector(LunarLanderConnector):
+class LunarLanderODEConnector(ODEEnvConnector):
     def __init__(self, **kwargs):
         super().__init__()
 
     @staticmethod
-    def make_transition_model(args):
-        T = ForcedDynamics(state_size=args.state_dims, action_size=args.action_dims, nhidden=512)
-        return T
+    def make_reward_model(args):
+        return SimpleReward()
 
     def make_env(self, args):
         # environment
         env = gym.make(args.env)
+        env = VizWrapper(env)
         env = PhysicsStateOnly(env)
         env.observation_space = gym.spaces.Box(-np.inf, +np.inf, (6,))
         self.set_env_dims(args, env)
@@ -667,4 +691,3 @@ class LunarLanderODEConnector(LunarLanderConnector):
 if __name__ == '__main__':
     env = LunarLander()
     demo_heuristic_lander(env, render=True)
-    env.viz.draw()

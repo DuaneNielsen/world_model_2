@@ -86,6 +86,13 @@ def get_size(space):
             raise Exception('VizWrapper only supports 1D state spaces')
 
 
+def make_map(type_name, size):
+    state_map = {}
+    for i in range(size):
+        state_map[f'{type_name} {i}'] = i
+    return state_map
+
+
 class VizWrapper(gym.Wrapper):
     """  will draw trajectories for states and actions
     to configure pass a dict that maps index to name
@@ -115,26 +122,20 @@ class VizWrapper(gym.Wrapper):
             if not hasattr(self.env, 'observation_space'):
                 raise Exception('env.observation_space not defined, define or pass a config')
 
-            for i in range(get_size(self.env.observation_space)):
-                name = f'state {i}'
-                self.viz.add_panel(name)
-                self.state_map[name] = i
-        else:
-            for key in state_map:
-                self.viz.add_panel(key)
+            self.state_map = make_map('state', get_size(self.env.observation_space))
+
+        for key in self.state_map:
+            self.viz.add_panel(key)
 
         if action_map is None:
 
             if not hasattr(self.env, 'action_space'):
                 raise Exception('env.action_space not defined, define it or pass a config')
 
-            for i in range(get_size(self.env.action_space)):
-                name = f'action {i}'
-                self.viz.add_panel(name)
-                self.action_map[name] = i
-        else:
-            for key in action_map:
-                self.viz.add_panel(key)
+            self.action_map = make_map('action', get_size(self.env.action_space))
+
+        for key in self.action_map:
+            self.viz.add_panel(key)
 
         self.state_map, self.state_index = make_np_index(self.state_map)
         self.action_map, self.action_index = make_np_index(self.action_map)

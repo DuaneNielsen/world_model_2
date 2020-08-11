@@ -22,19 +22,17 @@ class TensorNamespace(SimpleNamespace):
 
 
 class SaveLoad:
-    def __init__(self, label, checkpoint_secs=300):
+    def __init__(self, label):
         self.label = label
-        self.checkpoint_cooldown = Cooldown(checkpoint_secs)
         self.items_processed = 0
         self.best_loss = None
 
     def checkpoint(self, model, optimizer):
-        if self.checkpoint_cooldown:
-            save = {}
-            save['items_processed'] = self.items_processed
-            save['optimizer_state_dict'] = optimizer.state_dict()
-            save['model'] = model.state_dict()
-            torch.save(save, str(Path(wandb.run.dir) / Path(f'{self.label}_checkpoint.pt')))
+        save = {}
+        save['items_processed'] = self.items_processed
+        save['optimizer_state_dict'] = optimizer.state_dict()
+        save['model'] = model.state_dict()
+        torch.save(save, str(Path(wandb.run.dir) / Path(f'{self.label}_checkpoint.pt')))
 
     def is_best(self, loss, mode='lowest', store=True):
         """ this function is rubbish and needs a rewrite"""
@@ -50,6 +48,7 @@ class SaveLoad:
         return improved
 
     def save(self, model, suffix, **kwargs):
+        """ saves model state dict as a dict['model'] to a file with <model_name>_suffix.pt"""
         save = {}
         for arg, value in kwargs.items():
             save[arg] = value

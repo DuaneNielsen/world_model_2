@@ -2,6 +2,7 @@ import curses
 import random
 from collections import OrderedDict, deque
 from statistics import mean
+import math
 
 from matplotlib import pyplot as plt
 from time import sleep
@@ -64,7 +65,7 @@ def put_strip(image_size, center, thickness, dim, mu, stdev=None, covar=None):
     strip = strip.cpu().numpy()
     lower, upper = strip_index(center, thickness, image_size[dim])
     if dim == 1:
-        image[:, lower:upper] = strip.T
+        image[:, lower:upper] = strip.model
     elif dim == 0:
         image[lower:upper, :] = strip
     image = ((image / np.max(image)) * 255).astype(np.uint)
@@ -523,3 +524,93 @@ class Viz:
 
     def update_policy_entropy(self, entropy):
         self.live_policy_entropy.update(entropy, 'entropy')
+
+
+def make_map(type_name, size):
+    state_map = {}
+    for i in range(size):
+        state_map[f'{type_name} {i}'] = i
+    return state_map
+
+def _np(x):
+    return x.detach().cpu().numpy()
+
+
+class VizTransition:
+    def __init__(self, state_dims, action_dims, figsize=(12, 12), layout=(8, 2), state_map=None, action_map=None):
+        """  will draw trajectories for states and actions
+        to configure pass a dict that maps index to name
+
+        state_map =  {
+            'x_pos': 0,
+            'y_pos': 1,
+            'x_vel' : 2,
+            'y_vel' : 3,
+        }
+
+        else it will try to create a layout for state_dims and action_dims
+
+        update the panel by using the update method
+
+        """
+        plt.ion()
+
+        self.fig = plt.figure(figsize=figsize)
+        self.fig.canvas.set_window_title('Dynamics')
+
+        self.layout = layout
+        subplots = self.layout[0] * self.layout[1]
+        if subplots < (state_dims + action_dims):
+            int_sqrt = math.ceil(math.sqrt(subplots))
+            self.layout = (int_sqrt, int_sqrt)
+
+        self.next_panel = 1
+        self.panels = {}
+
+        self.state_map = make_map('state', state_dims) if state_map is None else state_map
+        self.action_map = make_map('action', action_dims) if action_map is None else action_map
+
+        for key in self.state_map:
+            self.add_subplot(key)
+        for key in self.action_map:
+            self.add_subplot(key)
+
+    def add_subplot(self, key):
+        self.panels[key] = self.fig.add_subplot(*self.layout, self.next_panel, )
+        self.next_panel += 1
+
+    def update_panel(self, key, i, t, trajectories, prediction=None):
+        panel = self.panels[key]
+        panel.clear()
+        panel.set_title(key)
+        panel.tick_params(
+            axis='x',  # changes apply to the x-axis
+            which='both',  # both major and minor ticks are affected
+            bottom=False,  # ticks along the bottom edge are off
+            top=False,  # ticks along the top edge are off
+            labelbottom=False)
+        panel.plot(_np(t), _np(trajectories[1:, 0, i]), label='trajectory')
+        if prediction is not None:
+            panel.plot(_np(t), _np(prediction[:, 0, i]), label='prediction')
+        panel.legend()
+
+    def update(self, trajectories, prediction, t=None):
+        """
+        call this method to update the panel
+        :param t: array of trajectory
+        :param trajectories: the batch, a Namespace of tensors returned by collate_pad_2
+        :param prediction: a tensor of states, L, N S
+        :return:
+        """
+
+        L, N, S = trajectories.state.shape
+
+        t = torch.linspace(0, L, L-1) if t is None else t
+
+        for key, i in self.state_map.items():
+            self.update_panel(key, i, t, trajectories.state, prediction)
+
+        for key , i in self.action_map.items():
+            self.update_panel(key, i, t, trajectories.action)
+
+        self.fig.canvas.draw()
