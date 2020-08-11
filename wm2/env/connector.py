@@ -171,7 +171,7 @@ class LSTMTransitionModel(DreamTransitionModel):
         self.model = StochasticTransitionModel(input_dim=args.state_dims + args.action_dims,
                                   hidden_dim=args.dynamics_hidden_dim, output_dim=args.state_dims,
                                   layers=args.dynamics_layers, dropout=args.dynamics_dropout)
-        self.viz = VizTransition(state_dims=args.state_dims, action_dims=args.action_dims)
+        self.viz = VizTransition(state_dims=args.state_dims, action_dims=args.action_dims, title=args.name)
         self.viz_cooldown = Cooldown(secs=10)
 
     def learn(self, args, buffer, optim):
@@ -197,7 +197,6 @@ class LSTMTransitionModel(DreamTransitionModel):
             if self.viz_cooldown():
                 self.viz.update(trajectories, predicted_state.loc[1:])
 
-
         if hasattr(self.model, 'dropout'):
             self.model.dropout_off()
 
@@ -221,13 +220,6 @@ class LSTMTransitionModel(DreamTransitionModel):
         :return: prob of continuing, reward and value of dimension H, L, N, 1
         """
         # anchor on the sampled trajectory
-
-        # reward = [R(trajectory.state)]
-        # reward = [torch.zeros((L, N, 1), device=args.device)]
-        # p_of_continuing = [pcont(trajectory.state)]
-        # v = [value(trajectory.state)]
-        # imagine forward here
-
         L, N = trajectory.state.shape[0:2]
         state = trajectory.state.reshape(1, N*L, -1)
         action = trajectory.action.reshape(1, N*L, -1)
@@ -242,14 +234,6 @@ class LSTMTransitionModel(DreamTransitionModel):
             imagine += [state]
         return torch.cat(imagine, dim=0).reshape(args.horizon + 1, L, N, -1)
 
-            # reward += [R(state)]
-            # p_of_continuing += [pcont(state)]
-            # v += [value(state)]
-        # VR = torch.mean(torch.stack(reward), dim=0)
-
-        #rstack, vstack, pcontstack = torch.stack(reward), torch.stack(v), torch.stack(p_of_continuing)
-        #return pcontstack, rstack, vstack
-
 
 class ODEDynamicsModel(DreamTransitionModel):
     def __init__(self, args):
@@ -257,7 +241,7 @@ class ODEDynamicsModel(DreamTransitionModel):
         self.model = ForcedDynamics(state_size=args.state_dims, action_size=args.action_dims, nhidden=512)
         self.state_labels = None
         self.action_labels = None
-        self.viz = VizTransition(state_dims=args.state_dims, action_dims=args.action_dims)
+        self.viz = VizTransition(state_dims=args.state_dims, action_dims=args.action_dims, title=args.name)
         self.viz_cooldown = Cooldown(secs=10)
 
     def learn(self, args, buffer, optim):

@@ -538,6 +538,7 @@ def get_args(defaults):
 
 
 defaults = {
+    'name': 'default_run',
     'env': 'HalfCheetahPyBulletEnv-v0',
     'connector': 'wm2.env.connector:EnvConnector',
     'seed_episodes': 10,

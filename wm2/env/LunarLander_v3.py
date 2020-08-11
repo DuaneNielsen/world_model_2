@@ -639,7 +639,7 @@ class LunarLanderConnector(EnvConnector):
     def make_env(self, args):
         # environment
         env = gym.make(args.env)
-        env = VizWrapper(env)
+        env = VizWrapper(env, title=args.name)
         env = PhysicsStateOnly(env)
         env.observation_space = gym.spaces.Box(-np.inf, +np.inf, (6,))
         self.set_env_dims(args, env)
@@ -681,7 +681,7 @@ class LunarLanderODEConnector(ODEEnvConnector):
     def make_env(self, args):
         # environment
         env = gym.make(args.env)
-        env = VizWrapper(env)
+        env = VizWrapper(env, title=args.name)
         env = PhysicsStateOnly(env)
         env.observation_space = gym.spaces.Box(-np.inf, +np.inf, (6,))
         self.set_env_dims(args, env)

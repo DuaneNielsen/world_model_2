@@ -537,7 +537,8 @@ def _np(x):
 
 
 class VizTransition:
-    def __init__(self, state_dims, action_dims, figsize=(12, 12), layout=(8, 2), state_map=None, action_map=None):
+    def __init__(self, state_dims, action_dims, figsize=(12, 12), layout=(8, 2), title='Dynamics',
+                 state_map=None, action_map=None):
         """  will draw trajectories for states and actions
         to configure pass a dict that maps index to name
 
@@ -556,7 +557,7 @@ class VizTransition:
         plt.ion()
 
         self.fig = plt.figure(figsize=figsize)
-        self.fig.canvas.set_window_title('Dynamics')
+        self.fig.canvas.set_window_title(title)
 
         self.layout = layout
         subplots = self.layout[0] * self.layout[1]

@@ -36,10 +36,11 @@ class LiveLine:
 
 
 class VizPanel:
-    def __init__(self):
+    def __init__(self, title=None):
         plt.ion()
         self.fig = plt.figure(figsize=(24, 16), dpi=80, facecolor='w', edgecolor='k', )
-        self.fig.canvas.set_window_title('Lander Viz')
+        if title is not None:
+            self.fig.canvas.set_window_title(title)
         self.current_panel = 1
         self.panels = (5, 3)
         self.panels_array = {}
@@ -108,9 +109,9 @@ class VizWrapper(gym.Wrapper):
 
     """
 
-    def __init__(self, env, state_map=None, action_map=None):
+    def __init__(self, env, state_map=None, action_map=None, title=None):
         super().__init__(env)
-        self.viz = VizPanel()
+        self.viz = VizPanel(title=title)
         self.configured = False
         self.state_map = {} if state_map is None else state_map
         self.state_index = None
