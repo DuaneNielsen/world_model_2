@@ -1,5 +1,5 @@
 env: 'LunarLanderContinuous-v3'
-connector: 'wm2.env.LunarLander_v3:LunarLanderConnector'
+connector: 'wm2.connectors.LunarLander_v3:LunarLanderConnector'
 seed_episodes: 5
 collect_interval: 10
 batch_size: 40

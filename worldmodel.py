@@ -51,20 +51,102 @@ def log_prob_loss_entropy(trajectories, predicted_state):
     return - log_p - entropy
 
 
+class Identity:
+    def __call__(self, input):
+        return input
+
+
+class EnvObserver:
+    def __init__(self):
+        pass
+
+    def reset(self):
+        """ called before environment reset"""
+        pass
+
+    def step(self, state, action, reward, done, info, action_dist, sampled_action):
+        """ called each environment step """
+        pass
+
+    def end(self):
+        """ called when episode ends """
+        pass
+
+
+class BufferWriter(EnvObserver):
+    def __init__(self, buffer, state_prepro, reward_prepro):
+        super().__init__()
+        self.b = buffer
+        self.state_prepro = state_prepro
+        self.reward_prepro = reward_prepro
+        self.current_trajectory = 0
+
+    def reset(self):
+        self.current_trajectory = self.b.next_traj()
+
+    def append(self, state, action, reward, done, info, action_dist, sampled_action):
+        self.current_trajectory.append(self.state_prepro(state),
+                                       action,
+                                       self.reward_prepro(reward),
+                                       done,
+                                       info)
+
+
+class EnvRunner:
+    def __init__(self, args, env, action_pipeline, seed=None):
+        self.args = args
+        self.env = env
+        if seed is not None:
+            env.seed(seed)
+        self.observers = {}
+        self.action_pipeline = action_pipeline
+
+    def attach(self, name, observer):
+        self.observers[name] = observer
+
+    def detach(self, name):
+        del self.observers[name]
+
+    def observer_reset(self):
+        for name, observer in self.observers.items():
+            observer.reset()
+
+    def observe_step(self, state, action, reward, done, info, action_dist, sampled_action):
+        for name, observer in self.observers.items():
+            observer.append(state, action, reward, done, info, action_dist, sampled_action)
+
+    def observer_episode_end(self):
+        for name, observer in self.observers.items():
+            observer.end()
+
+    def render(self, render, delay):
+        if render:
+            self.env.render()
+            time.sleep(delay)
+
+    def episode(self, args, policy, render=False, delay=0.01):
+        with torch.no_grad():
+            self.observer_reset()
+            state, reward, done, info = self.env.reset(), 0.0, False, {}
+            action_dist, sampled_action, action = self.action_pipeline(args, state, policy)
+            self.observe_step(state, action, reward, done, info, action_dist, sampled_action)
+            self.render(render, delay)
+            while not done:
+                state, reward, done, info = self.env.step(action)
+                action_dist, sampled_action, action = self.action_pipeline(args, state, policy)
+                self.observe_step(state, action, reward, done, info, action_dist, sampled_action)
+                self.render(render, delay)
+
+            self.observer_episode_end()
+
+
 def gather_experience(buff, episode, env, connector, policy, eps=0.0, expln_noise=0.0, render=True, seed=None,
                       delay=0.01):
     with torch.no_grad():
-        # gather new experience
-        episode_reward = []
-        episode_entropy = []
-        if seed is not None:
-            env.seed(seed)
-        state, reward, done = env.reset(), 0.0, False
-        episode_reward += [reward]
-        eps_policy = connector.make_random_policy(env)
 
         def get_action(state, reward, done):
             t_state = connector.policy_prepro(state, args.device).unsqueeze(0)
+
             if random.random() >= eps:
                 action_dist = policy(t_state)
                 action = action_dist.rsample()
@@ -74,6 +156,7 @@ def gather_experience(buff, episode, env, connector, policy, eps=0.0, expln_nois
                 action_dist = eps_policy(t_state)
                 action = action_dist.rsample()
             action = connector.action_prepro(action)
+
             buff.append(episode,
                         connector.buffer_prepro(state),
                         action,
@@ -86,14 +169,26 @@ def gather_experience(buff, episode, env, connector, policy, eps=0.0, expln_nois
                 # print(reward, state[-2], state[-3])
             return action, action_dist
 
+        # gather new experience
+        episode_reward = []
+        episode_entropy = []
+        eps_policy = connector.make_random_policy(env)
+
+        if seed is not None:
+            env.seed(seed)
+
+        state, reward, done = env.reset(), 0.0, False
+
         action, action_dist = get_action(state, reward, done)
         episode_entropy += [action_dist.entropy().mean().item()]
+        episode_reward += [reward]
 
         while not done:
             state, reward, done, info = env.step(action)
-            episode_reward += [reward]
             action, action_dist = get_action(state, reward, done)
+
             episode_entropy += [action_dist.entropy().mean().item()]
+            episode_reward += [reward]
 
     return buff, episode_reward, episode_entropy
 
@@ -132,19 +227,28 @@ def main(args):
     episode_refresh = wm2.utils.Cooldown(secs=args.viz_episode_refresh)
     viz = Viz(args=args, window_title=f'{wandb.run.project} {wandb.run.id}')
 
-    """ connect environment """
-    connector = make_connector(args)
-    env = connector.make_env(args)
-    random_policy = connector.make_random_policy(env)
-    env_viz = connector.make_viz(args)
-
     """ experience buffers """
     train_buff = Buffer(p_cont_algo=args.pcont_algo, terminal_repeats=args.pcont_terminal_repeats)
     test_buff = Buffer(p_cont_algo=args.pcont_algo, terminal_repeats=args.pcont_terminal_repeats)
-    train_buff = gather_seed_episodes(env, connector, random_policy, train_buff, args.seed_episodes)
-    test_buff = gather_seed_episodes(env, connector, random_policy, test_buff, args.seed_episodes)
     train_episode, test_episode = args.seed_episodes, args.seed_episodes
     dummy_buffer = DummyBuffer()
+
+    """ connect environment """
+    connector = make_connector(args)
+    env = connector.make_env(args)
+    action_pipeline = connector.make_action_pipeline()
+    train_runner = EnvRunner(args, env, action_pipeline)
+    train_runner.attach('train_buffer', BufferWriter(train_buff, connector.buffer_prepro, connector.reward_prepro))
+    test_runner = EnvRunner(args, env, action_pipeline)
+    test_runner.attach('train_buffer', BufferWriter(test_buff, connector.buffer_prepro, connector.reward_prepro))
+    random_policy = connector.make_random_policy(env)
+    env_viz = connector.make_viz(args)
+
+    train_runner.episode(args, random_policy, True)
+    test_runner.episode(args, random_policy, True)
+
+    # train_buff = gather_seed_episodes(env, connector, random_policy, train_buff, args.seed_episodes)
+    # test_buff = gather_seed_episodes(env, connector, random_policy, test_buff, args.seed_episodes)
 
     """ policy model """
     policy, policy_optim = connector.make_policy(args)
@@ -399,55 +503,57 @@ def main(args):
             train_behavior()
 
         "run the policy on the environment and collect experience"
-        train_buff, reward, entropy = gather_experience(train_buff, train_episode, env, connector, policy,
-                                                        eps=0.0, seed=args.seed,
-                                                        render=render_cooldown(), expln_noise=args.exploration_noise)
+        # train_buff, reward, entropy = gather_experience(train_buff, train_episode, env, connector, policy,
+        #                                                 eps=0.0, seed=args.seed,
+        #                                                 render=render_cooldown(), expln_noise=args.exploration_noise)
         # if episode_refresh():
         #     viz.update_trajectory_plots(value, R, pcont, T, train_buff, train_episode, entropy)
+        train_runner.episode(args, policy, render=True)
 
         train_episode += 1
 
-        wandb.log({'reward': reward})
-        viz.update_rewards(reward)
-        recent_reward.append(sum(reward))
-        scr.update_slot('eps', f'exploration_noise: {args.exploration_noise} '
-                               f'forward_slope: {args.forward_slope} '
-                               f'pcont_algo {args.pcont_algo} pcont_terminal_repeats {args.pcont_terminal_repeats}')
-        rr = ''
-        for reward in recent_reward:
-            rr += f' {reward:.5f},'
-        scr.update_slot('recent_rewards', 'Recent rewards: ' + rr)
-        scr.update_slot('beat_ave_reward', f'Best {best_stats}')
-
-        "check if the policy is worth saving"
-        if reward > best_stats['mean']:
-            sampled_rewards = []
-
-            for _ in range(args.best_policy_sample_n):
-                dummy_buffer, reward, entropy = gather_experience(dummy_buffer, train_episode, env, connector, policy,
-                                                                  eps=0.0,
-                                                                  expln_noise=0.0, seed=args.seed)
-                sampled_rewards.append(sum(reward))
-            if mean(sampled_rewards) > best_stats['mean']:
-                best_stats['mean'] = mean(sampled_rewards)
-                best_stats['std'] = stdev(sampled_rewards)
-                best_stats['max'] = max(sampled_rewards)
-                best_stats['min'] = min(sampled_rewards)
-                best_stats['itr'] = iteration
-                best_stats['n'] = args.best_policy_sample_n
-                best_stats['expl'] = args.exploration_noise
-                best_stats['fw_s'] = args.forward_slope
-
-                policy_saver.save(policy, 'best', **best_stats)
-
-        test_buff, reward, entropy = gather_experience(test_buff, test_episode, env, connector, policy,
-                                                       eps=0.0,
-                                                       render=False, expln_noise=args.exploration_noise, seed=args.seed)
-        test_episode += 1
+        # wandb.log({'reward': reward})
+        # viz.update_rewards(reward)
+        # recent_reward.append(sum(reward))
+        # scr.update_slot('eps', f'exploration_noise: {args.exploration_noise} '
+        #                        f'forward_slope: {args.forward_slope} '
+        #                        f'pcont_algo {args.pcont_algo} pcont_terminal_repeats {args.pcont_terminal_repeats}')
+        # rr = ''
+        # for reward in recent_reward:
+        #     rr += f' {reward:.5f},'
+        # scr.update_slot('recent_rewards', 'Recent rewards: ' + rr)
+        # scr.update_slot('beat_ave_reward', f'Best {best_stats}')
+        #
+        # "check if the policy is worth saving"
+        # if reward > best_stats['mean']:
+        #     sampled_rewards = []
+        #
+        #     for _ in range(args.best_policy_sample_n):
+        #         dummy_buffer, reward, entropy = gather_experience(dummy_buffer, train_episode, env, connector, policy,
+        #                                                           eps=0.0,
+        #                                                           expln_noise=0.0, seed=args.seed)
+        #         sampled_rewards.append(sum(reward))
+        #     if mean(sampled_rewards) > best_stats['mean']:
+        #         best_stats['mean'] = mean(sampled_rewards)
+        #         best_stats['std'] = stdev(sampled_rewards)
+        #         best_stats['max'] = max(sampled_rewards)
+        #         best_stats['min'] = min(sampled_rewards)
+        #         best_stats['itr'] = iteration
+        #         best_stats['n'] = args.best_policy_sample_n
+        #         best_stats['expl'] = args.exploration_noise
+        #         best_stats['fw_s'] = args.forward_slope
+        #
+        #         policy_saver.save(policy, 'best', **best_stats)
+        #
+        # test_buff, reward, entropy = gather_experience(test_buff, test_episode, env, connector, policy,
+        #                                                eps=0.0,
+        #                                                render=False, expln_noise=args.exploration_noise, seed=args.seed)
+        # test_episode += 1
 
         if viz_cooldown():
+            test_runner.episode(args, policy, render=True)
             viz.plot_rewards_histogram(train_buff, R)
-            #viz.update_dynamics(test_buff, T)
+            # viz.update_dynamics(test_buff, T)
             viz.update_pcont(test_buff, pcont)
             viz.update_value(test_buff, value)
             env_viz.update(args, test_buff, policy, R, value, T, pcont)

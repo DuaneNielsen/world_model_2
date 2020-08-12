@@ -1,9 +1,12 @@
+from pathlib import Path
+
 import torch
 from torch import nn as nn
 from torch.distributions import Categorical, Normal, MixtureSameFamily
 from torch.nn import functional as F
 
 from distributions import ScaledTanhTransformedGaussian
+import wm2.utils
 
 
 class MLP(nn.Module):
@@ -203,3 +206,37 @@ class ForcedDynamics(nn.Module):
         controlled = torch.cat([state, actions], dim=1)
         dstate = self.dynamics(controlled)
         return dstate
+
+
+class DreamModel(nn.Module):
+    def __init__(self, name, *args, **kwargs):
+        super().__init__()
+        self.model = None
+        self.saver = wm2.utils.SaveLoad(name)
+
+    def learn(self, args, buffer, optim):
+        pass
+
+    def forward(self, *args, **kwargs):
+        return self.model.forward(*args, **kwargs)
+
+    def save(self, suffix, **kwargs):
+        """ saves model state dict as a dict['model'] to a file with <model_name>_suffix.pt"""
+        self.saver.save(self, suffix, **kwargs)
+
+    @staticmethod
+    def load(self, wandb_run_dir, label, suffix):
+        return wm2.utils.SaveLoad.load(wandb_run_dir, label, suffix)
+
+    def checkpoint(self, optimizer):
+        self.saver.checkpoint(self.model, optimizer)
+
+    @staticmethod
+    def restore_checkpoint(label, wandb_run_dir):
+        f = str(Path(wandb_run_dir) / Path(f'{label}_checkpoint.pt'))
+        return torch.load(f)
+
+
+class DreamTransitionModel(DreamModel):
+    def imagine(self, args, trajectory, policy):
+        pass

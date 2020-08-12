@@ -22,6 +22,12 @@ register(
     reward_threshold=200,
 )
 
+register(
+    id='LunarLander-v3',
+    entry_point='wm2.env.LunarLander_v3:LunarLander',
+    max_episode_steps=1000,
+    reward_threshold=200,
+)
 
 register(
     id='HalfCheetahPyBulletEnv-v1',

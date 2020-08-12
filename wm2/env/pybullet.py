@@ -1,6 +1,6 @@
 import torch
 
-from env.connector import EnvConnector
+from connectors.connector import EnvConnector
 import numpy as np
 import gym
 import torch.nn as nn

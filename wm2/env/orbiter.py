@@ -1,9 +1,9 @@
-from vpython import sphere, vector, rate, color, arrow, canvas, cross, triangle, vertex
+from vpython import sphere, vector, rate, color, arrow, canvas, cross
 from math import sqrt
 import numpy as np
 import gym
 from gym.spaces import Box
-from env.connector import EnvConnector
+from connectors.connector import EnvConnector
 from torch import nn
 
 G = 6.67e-11  # N kg^-2 m^2

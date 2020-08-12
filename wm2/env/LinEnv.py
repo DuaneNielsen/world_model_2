@@ -1,7 +1,6 @@
 import numpy as np
 import gym
-from wm2.env.connector import EnvConnector, EnvViz
-from wm2.models.models import SoftplusMLP
+from connectors.connector import EnvConnector, EnvViz
 import torch.nn as nn
 import torch
 import matplotlib.pyplot as plt

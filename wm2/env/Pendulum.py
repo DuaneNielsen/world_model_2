@@ -1,7 +1,7 @@
 import numpy as np
 import torch
 from matplotlib import pyplot as plt
-from wm2.env.connector import EnvConnector, EnvViz
+from connectors.connector import EnvConnector, EnvViz
 
 
 class PendulumConnector(EnvConnector):
