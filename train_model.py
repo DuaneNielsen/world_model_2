@@ -12,19 +12,19 @@ import torch
 from torch.optim import Adam
 import torch.nn as nn
 from torch.distributions import OneHotCategorical
-from torch.utils.data.dataloader import DataLoader
-from torch.utils.data.sampler import WeightedRandomSampler
+from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
 import torch.nn.init
 from torch.nn.functional import log_softmax
 import wandb
+import torch.nn.functional as F
 
-from data.datasets import SARDataset, RewDataset, DoneDataset, gather_data
+from data.datasets import RewDataset, DoneDataset, gather_data
 import wm2.env.wrappers as wrappers
 from functional import compute_covar
 from keypoints.utils import UniImageViewer
 from utils import Pbar
 from viz import debug_image, put_strip, put_gaussian, display_predictions
-from data.utils import pad_collate, autoregress, chomp_and_pad
+from data.utils import pad_collate, autoregress, chomp_and_pad, pad_collate_old
 from wm2.models.causal import Causal
 import utils
 import models.causal
@@ -51,6 +51,43 @@ def done_model(state_dict=None):
     if state_dict is not None:
         model.load_state_dict(state_dict)
     return model
+
+
+def mask_all(state, reward, action):
+    return np.ones((len(state), 1), dtype=bool)
+
+
+class SARDataset(Dataset):
+    def __init__(self, buffer, mask_f=None):
+        super().__init__()
+        self.b = buffer
+        self.mask_f = mask_f if mask_f is not None else mask_all
+
+    def __len__(self):
+        return len(self.b.trajectories)
+
+    def __getitem__(self, item):
+        trajectory = self.b.trajectories[item]
+        state, reward, action, done, mask, pcont = [], [], [], [], [], []
+        for step in trajectory:
+            state += [step.state]
+            reward += [step.reward]
+            # if isinstance(step.action, int):
+            #     action += [one_hot(step.action, self.b.action_max)]
+            # else:
+            action += [step.action]
+            done += [step.done]
+
+        astack = np.stack(action)
+        done = np.stack(done)
+        done = done[:, np.newaxis]
+
+        return {'state': np.stack(state),
+                'action': astack,
+                'reward': np.stack(reward),
+                'done': done,
+                'mask': self.mask_f(state, reward, action)
+                }
 
 
 def train_reward_class(buff, test_buff, epochs, test_freq=2):
@@ -215,7 +252,8 @@ def train_predictor(mu_encoder, mu_decoder, train_buff, test_buff, items_total, 
         for mb in train:
             seqs = autoregress(mb.state, mb.action, mb.reward.unsqueeze(2), mb.mask, target_start, target_len).to(device)
             optim.zero_grad()
-            inp = torch.cat((seqs.source, seqs.action), dim=2)
+            action = F.one_hot(seqs.action, 6).float()
+            inp = torch.cat((seqs.source, action), dim=2)
             hidden = mu_encoder(inp)
 
             h = hidden.repeat(mu_decoder.layers, 1, 1).contiguous()
@@ -238,7 +276,8 @@ def train_predictor(mu_encoder, mu_decoder, train_buff, test_buff, items_total, 
                 with torch.no_grad():
                     for i, mb in enumerate(test):
                         seqs = autoregress(mb.state, mb.action, mb.reward.unsqueeze(2), mb.mask, target_start, target_len).to(device)
-                        inp = torch.cat((seqs.source, seqs.action), dim=2)
+                        action = F.one_hot(seqs.action, 6).float()
+                        inp = torch.cat((seqs.source, action), dim=2)
                         hidden = mu_encoder(inp)
 
                         inp_future = make_future_seq(inp, horizon)
@@ -480,19 +519,23 @@ if __name__ == '__main__':
                 device='cuda:0',
                 horizon=10,
                 samples=4,
-                demo=True)
+                demo=False)
 
     dev = dict(mode='dev',
-               train_len=2,
-               test_len=2,
+               train_len=512,
+               test_len=16,
                render=False,
                display_cooldown=30,
                device='cuda:1',
                horizon=6,
-               samples=2,
+               samples=10,
                demo=False)
 
     ensemble = {}
+    ensemble['ball'] = SimpleNamespace(state_dims=4, action_dims=6, reward_dims=1, hidden=[512, 512, 512, 512],
+                                       hidden_state_dims=512, items_total=20000, target_start=2,
+                                       target_len=2, mask_f=None)
+
     ensemble['player'] = SimpleNamespace(state_dims=4, action_dims=6, reward_dims=1, hidden=[512, 512, 512, 512],
                                          hidden_state_dims=512, items_total=10000,
                                          target_start=0,
@@ -503,20 +546,17 @@ if __name__ == '__main__':
                                         hidden_state_dims=512, items_total=10000, target_start=1,
                                         target_len=1,
                                         x=0.3, thickness=0.05, dim=1, mask_f=None)
-    ensemble['ball'] = SimpleNamespace(state_dims=4, action_dims=6, reward_dims=1, hidden=[512, 512, 512, 512],
-                                       hidden_state_dims=512, items_total=20000, target_start=2,
-                                       target_len=2, mask_f=None)
     ensemble['reward'] = SimpleNamespace(state_dims=4, action_dims=6, reward_dims=1, hidden=[512, 512, 512, 512],
                                          hidden_state_dims=512, items_total=10000, target_start=4,
                                          target_len=1, mask_f=reward_mask_f)
 
     # horizon 3
     #load_dir = 'wandb/dryrun-20200402_051722-39ai7s4u'
-    # load_dir = 'wandb/dryrun-20200403_003603-u0rp7alj'
+    #load_dir = 'wandb/dryrun-20200403_003603-u0rp7alj'
     # horizon 10
     #load_dir = 'wandb/dryrun-20200405_002951-fx78ujfz'
     # horizon 20
-    # load_dir = 'wandb/run-20200405_182039-5y0p6qwg'
+    #load_dir = 'wandb/run-20200405_182039-5y0p6qwg'
     load_dir = None
 
     wandb.init(config=dev)

@@ -246,10 +246,7 @@ class SARNextDataset(Dataset):
         for step in trajectory:
             state += [step.state]
             reward += [step.reward]
-            if isinstance(step.action, int):
-                action += [one_hot(step.action, self.b.action_max)]
-            else:
-                action += [step.action]
+            action += [step.action]
 
         #astack = np.stack(action[:-1])
         # print(f'SARNEXTDATASET {astack.max()}, {astack.min()}')

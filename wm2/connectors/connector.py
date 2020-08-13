@@ -43,7 +43,7 @@ class RandomDiscretePolicy(nn.Module):
         self.action_dims = action_dims
 
     def forward(self, state):
-        return OneHotCategorical(probs=torch.ones(self.action_dims)/self.action_dims)
+        return OneHotCategorical(probs=torch.ones(1, self.action_dims)/self.action_dims)
 
 
 def no_explore(args, action_dist):
@@ -99,6 +99,10 @@ class EnvConnector:
     @staticmethod
     def sample(action_dist):
         return action_dist.rsample()
+
+    @staticmethod
+    def store_action_prepro(args, action):
+        return action
 
     @staticmethod
     def make_action_pipeline():
@@ -174,78 +178,6 @@ class EnvConnector:
     def make_viz(args):
         return EnvViz()
 
-
-class DiscreteEnvConnector(EnvConnector):
-
-    @staticmethod
-    def policy_prepro(state, device):
-        return torch.tensor(state).float().to(device)
-
-    @staticmethod
-    def buffer_prepro(state):
-        return state.astype(np.float32)
-
-    @staticmethod
-    def reward_prepro(reward):
-        return np.array([reward], dtype=np.float32)
-
-    @staticmethod
-    def action_prepro(action):
-        if action.shape[1] == 1:
-            return action.detach().cpu().squeeze().unsqueeze(0).numpy().astype(np.float32)
-        else:
-            return action.detach().cpu().squeeze().numpy().astype(np.float32)
-
-    @staticmethod
-    def make_policy(args):
-        # policy model
-        policy = Policy(layers=[args.state_dims, *args.policy_hidden_dims, args.action_dims], min=args.action_min,
-                        max=args.action_max, nonlin=args.policy_nonlin).to(args.device)
-        policy_optim = Adam(policy.parameters(), lr=args.policy_lr)
-        return policy, policy_optim
-
-    @staticmethod
-    def make_value(args):
-        value = MLP([args.state_dims, *args.value_hidden_dims, 1], nonlin=args.value_nonlin).to(args.device)
-        value_optim = Adam(value.parameters(), lr=args.value_lr)
-        return value, value_optim
-
-    @staticmethod
-    def make_random_policy(env):
-        return RandomPolicy(env.action_space.shape[0])
-
-    def set_env_dims(self, args, env):
-        args.state_dims = env.observation_space.shape[0]
-        args.action_dims = env.action_space.shape[0]
-        args.action_min = -1.0
-        args.action_max = 1.0
-
-    def make_env(self, args):
-        # environment
-        env = gym.make(args.env)
-        self.set_env_dims(args, env)
-        return env
-
-    @staticmethod
-    def make_transition_model(args):
-        return LSTMTransitionModel(args)
-
-    @staticmethod
-    def make_pcont_model(args):
-        if args.pcont_fixed_length:
-            return PcontFixed(), None
-
-        pcont = SoftplusMLP([args.state_dims, *args.pcont_hidden_dims, 1]).to(args.device)
-        pcont_optim = Adam(pcont.parameters(), lr=args.pcont_lr)
-        return pcont, pcont_optim
-
-    @staticmethod
-    def make_reward_model(args):
-        return MLP([args.state_dims, *args.reward_hidden_dims, 1], nonlin=args.reward_nonlin)
-
-    @staticmethod
-    def make_viz(args):
-        return EnvViz()
 
 
 class ODEEnvConnector(EnvConnector):

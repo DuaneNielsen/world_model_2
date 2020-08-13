@@ -8,7 +8,7 @@ from torch.distributions import Categorical
 from torchvision import transforms
 import torchvision.transforms.functional as TVF
 
-from utils import UniImageViewer, plot_keypoints_on_image
+from wm2.utils import UniImageViewer, plot_keypoints_on_image
 from keypoints.models import transporter, functional as KF
 from keypoints.ds import datasets as ds
 import gym

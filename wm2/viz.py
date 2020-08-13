@@ -65,7 +65,7 @@ def put_strip(image_size, center, thickness, dim, mu, stdev=None, covar=None):
     strip = strip.cpu().numpy()
     lower, upper = strip_index(center, thickness, image_size[dim])
     if dim == 1:
-        image[:, lower:upper] = strip.model
+        image[:, lower:upper] = strip.T
     elif dim == 0:
         image[lower:upper, :] = strip
     image = ((image / np.max(image)) * 255).astype(np.uint)

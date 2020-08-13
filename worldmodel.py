@@ -52,9 +52,8 @@ def log_prob_loss_entropy(trajectories, predicted_state):
 
 
 class Identity:
-    def __call__(self, input):
+    def __call__(self, input, *args):
         return input
-
 
 class EnvObserver:
     def __init__(self):
@@ -74,19 +73,21 @@ class EnvObserver:
 
 
 class BufferWriter(EnvObserver):
-    def __init__(self, buffer, state_prepro, reward_prepro):
+    def __init__(self, args, buffer, state_prepro, action_prepro, reward_prepro=None):
         super().__init__()
+        self.args = args
         self.b = buffer
         self.state_prepro = state_prepro
-        self.reward_prepro = reward_prepro
-        self.current_trajectory = 0
+        self.action_prepro = action_prepro
+        self.reward_prepro = Identity() if reward_prepro is None else reward_prepro
+        self.current_trajectory = None
 
     def reset(self):
         self.current_trajectory = self.b.next_traj()
 
     def append(self, state, action, reward, done, info, action_dist, sampled_action):
         self.current_trajectory.append(self.state_prepro(state),
-                                       action,
+                                       self.action_prepro(args, action),
                                        self.reward_prepro(reward),
                                        done,
                                        info)
@@ -140,65 +141,6 @@ class EnvRunner:
             self.observer_episode_end()
 
 
-def gather_experience(buff, episode, env, connector, policy, eps=0.0, expln_noise=0.0, render=True, seed=None,
-                      delay=0.01):
-    with torch.no_grad():
-
-        def get_action(state, reward, done):
-            t_state = connector.policy_prepro(state, args.device).unsqueeze(0)
-
-            if random.random() >= eps:
-                action_dist = policy(t_state)
-                action = action_dist.rsample()
-                action = Normal(action, expln_noise).sample()
-                action = action.clamp(min=-1.0, max=1.0)
-            else:
-                action_dist = eps_policy(t_state)
-                action = action_dist.rsample()
-            action = connector.action_prepro(action)
-
-            buff.append(episode,
-                        connector.buffer_prepro(state),
-                        action,
-                        connector.reward_prepro(reward),
-                        done,
-                        None)
-            if render:
-                env.render()
-                time.sleep(delay)
-                # print(reward, state[-2], state[-3])
-            return action, action_dist
-
-        # gather new experience
-        episode_reward = []
-        episode_entropy = []
-        eps_policy = connector.make_random_policy(env)
-
-        if seed is not None:
-            env.seed(seed)
-
-        state, reward, done = env.reset(), 0.0, False
-
-        action, action_dist = get_action(state, reward, done)
-        episode_entropy += [action_dist.entropy().mean().item()]
-        episode_reward += [reward]
-
-        while not done:
-            state, reward, done, info = env.step(action)
-            action, action_dist = get_action(state, reward, done)
-
-            episode_entropy += [action_dist.entropy().mean().item()]
-            episode_reward += [reward]
-
-    return buff, episode_reward, episode_entropy
-
-
-def gather_seed_episodes(env, connector, random_policy, buff, seed_episodes):
-    for episode in range(seed_episodes):
-        gather_experience(buff, episode, env, connector, random_policy, render=False)
-    return buff
-
-
 def make_connector(args):
     module_name, connector_class_name = args.connector.split(':')
     connector_module = importlib.import_module(module_name)
@@ -238,17 +180,18 @@ def main(args):
     env = connector.make_env(args)
     action_pipeline = connector.make_action_pipeline()
     train_runner = EnvRunner(args, env, action_pipeline)
-    train_runner.attach('train_buffer', BufferWriter(train_buff, connector.buffer_prepro, connector.reward_prepro))
+    train_runner.attach('train_buffer', BufferWriter(args, train_buff, connector.buffer_prepro,
+                                                     connector.store_action_prepro,
+                                                     connector.reward_prepro))
     test_runner = EnvRunner(args, env, action_pipeline)
-    test_runner.attach('train_buffer', BufferWriter(test_buff, connector.buffer_prepro, connector.reward_prepro))
+    test_runner.attach('test_buffer', BufferWriter(args, test_buff, connector.buffer_prepro,
+                                                   connector.store_action_prepro, connector.reward_prepro))
     random_policy = connector.make_random_policy(env)
     env_viz = connector.make_viz(args)
 
-    train_runner.episode(args, random_policy, True)
-    test_runner.episode(args, random_policy, True)
-
-    # train_buff = gather_seed_episodes(env, connector, random_policy, train_buff, args.seed_episodes)
-    # test_buff = gather_seed_episodes(env, connector, random_policy, test_buff, args.seed_episodes)
+    for episode in range(args.seed_episodes):
+        train_runner.episode(args, random_policy)
+    test_runner.episode(args, random_policy)
 
     """ policy model """
     policy, policy_optim = connector.make_policy(args)
@@ -583,9 +526,9 @@ def demo(dir, env, connector, n=100):
                 msg += f'{arg}: {value} '
         print(msg)
         policy.load_state_dict(load_dict['model'])
-        train_buff, reward, entropy = gather_experience(dummy_buffer, 0, env, connector, policy,
-                                                        eps=0.0,
-                                                        render=True, delay=1.0 / args.fps)
+        # train_buff, reward, entropy = gather_experience(dummy_buffer, 0, env, connector, policy,
+        #                                                 eps=0.0,
+        #                                                 render=True, delay=1.0 / args.fps)
         iterations += 1
 
 
@@ -680,6 +623,8 @@ defaults = {
     'policy_clip': 0.0,
     'policy_hidden_dims': [48, 48],
     'policy_nonlin': 'nn.ELU',
+
+    'explore_epsilon': 0.05,
 
     'reward_learnable': True,
     'reward_lr': 1e-4,
