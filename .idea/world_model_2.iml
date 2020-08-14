@@ -4,6 +4,7 @@
     <content url="file://$MODULE_DIR$">
       <sourceFolder url="file://$MODULE_DIR$/wm2" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/data" />
+      <excludeFolder url="file://$MODULE_DIR$/tests/.pytest_cache" />
       <excludeFolder url="file://$MODULE_DIR$/wandb" />
       <excludeFolder url="file://$MODULE_DIR$/wandb/dryrun-20200502_181243-ncuieqtx" />
     </content>
@@ -15,6 +16,7 @@
     <orderEntry type="module" module-name="cma-es" />
     <orderEntry type="module" module-name="odeint" />
     <orderEntry type="module" module-name="torchdiffeq" />
+    <orderEntry type="module" module-name="step_funcs" />
   </component>
   <component name="PackageRequirementsSettings">
     <option name="requirementsPath" value="" />

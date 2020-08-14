@@ -43,7 +43,7 @@ class RandomDiscretePolicy(nn.Module):
         self.action_dims = action_dims
 
     def forward(self, state):
-        return OneHotCategorical(probs=torch.ones(1, self.action_dims)/self.action_dims)
+        return OneHotCategorical(probs=torch.ones(1, self.action_dims)/self.action_dims).sample()
 
 
 def no_explore(args, action_dist):

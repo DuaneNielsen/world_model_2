@@ -66,7 +66,7 @@ class LSTMTransitionModel(DreamTransitionModel):
         #     scr.update_slot('transition_test', f'Transition test loss  {loss.item()}')
         #     wandb.log({'transition_test': loss.item()})
 
-    def imagine(self, args, trajectory, policy):
+    def imagine(self, args, trajectory, policy, action_pipeline):
         """
         predicts args.horizon steps ahead using T and initial conditions sampled from exp buffer
         :param N: Batch size
@@ -85,7 +85,7 @@ class LSTMTransitionModel(DreamTransitionModel):
             state, h = self.model(step)
             if isinstance(state, torch.distributions.Distribution):
                 state = state.rsample()
-            action = policy(state).rsample()
+            action = action_pipeline.sample(policy(state))
             imagine += [state]
         return torch.cat(imagine, dim=0).reshape(args.horizon + 1, L, N, -1)
 
@@ -119,7 +119,7 @@ class ODEDynamicsModel(DreamTransitionModel):
             if self.viz_cooldown():
                 self.viz.update(trajectories, pred_y, t)
 
-    def imagine(self, args, trajectory, policy):
+    def imagine(self, args, trajectory, policy, action_pipeline):
         """
         predicts args.horizon steps ahead using T and initial conditions sampled from exp buffer
         :param N: Batch size

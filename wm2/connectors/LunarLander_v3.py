@@ -1,12 +1,17 @@
+from random import random, randrange
+
 import gym
 import numpy as np
 import torch
 from torch import nn as nn
 from torch.nn import functional as F
+from torch import distributions
+from torch.optim import Adam
 
 from env.LunarLander_v3 import dist_k, damp_k, stablilty_k, stablity_damp, impact_k, land_k
-from connectors.connector import EnvConnector, ODEEnvConnector
+from connectors.connector import EnvConnector, ODEEnvConnector, ActionPipeline
 from env.gym_viz import VizWrapper
+from wm2.models.models import DiscretePolicy
 
 
 class PhysicsStateOnly(gym.ObservationWrapper):
@@ -116,6 +121,39 @@ class LunarLanderDiscreteLSTMConnector(EnvConnector):
         super().__init__()
 
     @staticmethod
+    def explore(args, action_dist):
+        if random() < args.explore_epsilon:
+            int = randrange(args.action_dims)
+            action_dist = torch.zeros_like(action_dist)
+            action_dist[:, int] = 1.0
+            # b, d = action_dist.batch_shape, action_dist.event_shape
+            # p = torch.ones(b + d).to(args.device) / args.action_dims
+            # action_dist = distributions.OneHotCategorical(p)
+        return action_dist
+
+    @staticmethod
+    def sample(action_dist):
+        return action_dist
+
+    @staticmethod
+    def action_prepro(action):
+        return torch.argmax(action, dim=1).item()
+
+    @staticmethod
+    def make_action_pipeline():
+        return ActionPipeline(policy_prepro=LunarLanderDiscreteLSTMConnector.policy_prepro,
+                              env_action_prepro=LunarLanderDiscreteLSTMConnector.action_prepro,
+                              explore=LunarLanderDiscreteLSTMConnector.explore,
+                              sample=LunarLanderDiscreteLSTMConnector.sample
+                              )
+
+    @staticmethod
+    def store_action_prepro(args, action):
+        one_hot = np.zeros(args.action_dims)
+        one_hot[action] = 1.0
+        return one_hot
+
+    @staticmethod
     def make_reward_model(args):
         return SimpleReward()
 
@@ -127,3 +165,10 @@ class LunarLanderDiscreteLSTMConnector(EnvConnector):
         env.observation_space = gym.spaces.Box(-np.inf, +np.inf, (6,))
         self.set_env_dims(args, env)
         return env
+
+    @staticmethod
+    def make_policy(args):
+        # policy model
+        policy = DiscretePolicy(layers=[args.state_dims, *args.policy_hidden_dims, args.action_dims], nonlin=args.policy_nonlin).to(args.device)
+        policy_optim = Adam(policy.parameters(), lr=args.policy_lr)
+        return policy, policy_optim

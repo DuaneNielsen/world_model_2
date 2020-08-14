@@ -2,7 +2,7 @@ from pathlib import Path
 
 import torch
 from torch import nn as nn
-from torch.distributions import Categorical, Normal, MixtureSameFamily
+from torch.distributions import Categorical, Normal, MixtureSameFamily, OneHotCategorical
 from torch.nn import functional as F
 
 from distributions import ScaledTanhTransformedGaussian
@@ -21,10 +21,13 @@ class MLP(nn.Module):
             net += [nn.Dropout(dropout)]
             net += [nonlin()]
             in_dims = hidden
-        net += [nn.Linear(in_dims, layers[-1], bias=False)]
-        net += [nn.Dropout(dropout)]
+        last = nn.Linear(in_dims, layers[-1], bias=False)
+        nn.init.zeros_(last.weight)
+        net += [last]
 
         self.mlp = nn.Sequential(*net)
+
+
 
     def forward(self, inp):
         return self.mlp(inp)
@@ -72,6 +75,35 @@ class Policy(nn.Module):
         mu = self.mu(state)
         scale = torch.sigmoid(self.scale(state)) + 0.1
         return ScaledTanhTransformedGaussian(mu, scale, min=self.min, max=self.max)
+
+
+class StraightThroughOneHot(torch.autograd.Function):
+    """
+    Estimating or Propagating Gradients Through Stochastic Neurons for Conditional Computation
+    https://arxiv.org/pdf/1308.3432.pdf
+    """
+    @staticmethod
+    def forward(ctx, x):
+        out = torch.zeros_like(x)
+        argm = torch.argmax(x, dim=1)
+        out[torch.arange(x.shape[0]), argm] = 1.0
+        return out
+
+    @staticmethod
+    def backward(ctx, grad):
+        return grad
+
+
+class DiscretePolicy(nn.Module):
+    def __init__(self, layers, nonlin=None):
+        super().__init__()
+        self.mu = MLP(layers, nonlin, dropout=0.0)
+        self.stoh = StraightThroughOneHot()
+
+    def forward(self, state):
+        p = F.softmax(self.mu(state), dim=1)
+        return self.stoh.apply(p)
+
 
 
 class TransitionModel(nn.Module):
@@ -238,5 +270,5 @@ class DreamModel(nn.Module):
 
 
 class DreamTransitionModel(DreamModel):
-    def imagine(self, args, trajectory, policy):
+    def imagine(self, args, trajectory, policy, action_pipeline):
         pass

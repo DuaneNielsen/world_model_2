@@ -1,10 +1,8 @@
 from collections import deque
 import collections
-from statistics import mean, stdev
 import random
 import curses
 import argparse
-import time
 import pathlib
 import yaml
 import re
@@ -22,9 +20,10 @@ import numpy as np
 import warnings
 import wandb
 
+from env.runner import EnvObserver, EnvRunner, RewardFilter
 from models.models import Policy
-from wm2.viz import Viz, DummyCurses
-from wm2.data.datasets import Buffer, SARDataset, SARNextDataset, SimpleRewardDataset, DummyBuffer, \
+from wm2.viz import VizBoard2, DummyCurses
+from wm2.data.datasets import Buffer, SARDataset, SimpleRewardDataset, DummyBuffer, \
     SubsetSequenceBuffer
 from wm2.utils import Pbar
 from wm2.data.utils import pad_collate_2
@@ -55,22 +54,6 @@ class Identity:
     def __call__(self, input, *args):
         return input
 
-class EnvObserver:
-    def __init__(self):
-        pass
-
-    def reset(self):
-        """ called before environment reset"""
-        pass
-
-    def step(self, state, action, reward, done, info, action_dist, sampled_action):
-        """ called each environment step """
-        pass
-
-    def end(self):
-        """ called when episode ends """
-        pass
-
 
 class BufferWriter(EnvObserver):
     def __init__(self, args, buffer, state_prepro, action_prepro, reward_prepro=None):
@@ -85,60 +68,12 @@ class BufferWriter(EnvObserver):
     def reset(self):
         self.current_trajectory = self.b.next_traj()
 
-    def append(self, state, action, reward, done, info, action_dist, sampled_action):
+    def step(self, state, action, reward, done, info, **kwargs):
         self.current_trajectory.append(self.state_prepro(state),
                                        self.action_prepro(args, action),
                                        self.reward_prepro(reward),
                                        done,
                                        info)
-
-
-class EnvRunner:
-    def __init__(self, args, env, action_pipeline, seed=None):
-        self.args = args
-        self.env = env
-        if seed is not None:
-            env.seed(seed)
-        self.observers = {}
-        self.action_pipeline = action_pipeline
-
-    def attach(self, name, observer):
-        self.observers[name] = observer
-
-    def detach(self, name):
-        del self.observers[name]
-
-    def observer_reset(self):
-        for name, observer in self.observers.items():
-            observer.reset()
-
-    def observe_step(self, state, action, reward, done, info, action_dist, sampled_action):
-        for name, observer in self.observers.items():
-            observer.append(state, action, reward, done, info, action_dist, sampled_action)
-
-    def observer_episode_end(self):
-        for name, observer in self.observers.items():
-            observer.end()
-
-    def render(self, render, delay):
-        if render:
-            self.env.render()
-            time.sleep(delay)
-
-    def episode(self, args, policy, render=False, delay=0.01):
-        with torch.no_grad():
-            self.observer_reset()
-            state, reward, done, info = self.env.reset(), 0.0, False, {}
-            action_dist, sampled_action, action = self.action_pipeline(args, state, policy)
-            self.observe_step(state, action, reward, done, info, action_dist, sampled_action)
-            self.render(render, delay)
-            while not done:
-                state, reward, done, info = self.env.step(action)
-                action_dist, sampled_action, action = self.action_pipeline(args, state, policy)
-                self.observe_step(state, action, reward, done, info, action_dist, sampled_action)
-                self.render(render, delay)
-
-            self.observer_episode_end()
 
 
 def make_connector(args):
@@ -167,31 +102,11 @@ def main(args):
     viz_cooldown = wm2.utils.Cooldown(secs=args.viz_cooldown)
     render_cooldown = wm2.utils.Cooldown(secs=args.viz_render_cooldown)
     episode_refresh = wm2.utils.Cooldown(secs=args.viz_episode_refresh)
-    viz = Viz(args=args, window_title=f'{wandb.run.project} {wandb.run.id}')
-
-    """ experience buffers """
-    train_buff = Buffer(p_cont_algo=args.pcont_algo, terminal_repeats=args.pcont_terminal_repeats)
-    test_buff = Buffer(p_cont_algo=args.pcont_algo, terminal_repeats=args.pcont_terminal_repeats)
-    train_episode, test_episode = args.seed_episodes, args.seed_episodes
-    dummy_buffer = DummyBuffer()
+    viz = VizBoard2(args=args, window_title=f'{wandb.run.project} {wandb.run.id}')
 
     """ connect environment """
     connector = make_connector(args)
     env = connector.make_env(args)
-    action_pipeline = connector.make_action_pipeline()
-    train_runner = EnvRunner(args, env, action_pipeline)
-    train_runner.attach('train_buffer', BufferWriter(args, train_buff, connector.buffer_prepro,
-                                                     connector.store_action_prepro,
-                                                     connector.reward_prepro))
-    test_runner = EnvRunner(args, env, action_pipeline)
-    test_runner.attach('test_buffer', BufferWriter(args, test_buff, connector.buffer_prepro,
-                                                   connector.store_action_prepro, connector.reward_prepro))
-    random_policy = connector.make_random_policy(env)
-    env_viz = connector.make_viz(args)
-
-    for episode in range(args.seed_episodes):
-        train_runner.episode(args, random_policy)
-    test_runner.episode(args, random_policy)
 
     """ policy model """
     policy, policy_optim = connector.make_policy(args)
@@ -209,6 +124,31 @@ def main(args):
     """ reward function or model"""
     R = connector.make_reward_model(args).to(args.device)
     R_optim = Adam(R.parameters(), lr=args.reward_lr) if args.reward_learnable else None
+
+    """ experience buffers """
+    train_buff = Buffer(p_cont_algo=args.pcont_algo, terminal_repeats=args.pcont_terminal_repeats)
+    test_buff = Buffer(p_cont_algo=args.pcont_algo, terminal_repeats=args.pcont_terminal_repeats)
+    train_episode, test_episode = args.seed_episodes, args.seed_episodes
+    dummy_buffer = DummyBuffer()
+
+    action_pipeline = connector.make_action_pipeline()
+    train_runner = EnvRunner(args, env, action_pipeline)
+    train_runner.attach_observer('train_buffer', BufferWriter(args, train_buff, connector.buffer_prepro,
+                                                              connector.store_action_prepro,
+                                                              connector.reward_prepro))
+    """ rewards for runner are done on cpu """
+    train_runner.append_step_filter('imagined_reward', RewardFilter(connector.policy_prepro, R, args.device))
+    train_runner.attach_observer('viz', viz)
+    test_runner = EnvRunner(args, env, action_pipeline)
+    test_runner.attach_observer('test_buffer', BufferWriter(args, test_buff, connector.buffer_prepro,
+                                                            connector.store_action_prepro, connector.reward_prepro))
+    random_policy = connector.make_random_policy(env)
+    env_viz = connector.make_viz(args)
+
+    for episode in range(args.seed_episodes):
+        train_runner.episode(args, random_policy)
+    test_runner.episode(args, random_policy)
+
 
     "save and restore helpers"
     R_saver = wm2.utils.SaveLoad('reward')
@@ -322,7 +262,7 @@ def main(args):
                     trajectory.state = trajectory.state.to(args.device)
                     trajectory.action = trajectory.action.to(args.device)
 
-                    prediction = T.imagine(args, trajectory, policy)
+                    prediction = T.imagine(args, trajectory, policy, action_pipeline)
 
                     rstack = R(prediction)
                     vstack = value(prediction)
@@ -409,7 +349,7 @@ def main(args):
                     policy_optim.step()
 
                     "housekeeping"
-                    viz.sample_grad_norm(policy, sample=0.05)
+                    viz.sample_grad_norm(policy, sample=0.1)
                     scr.update_slot('policy_loss', f'Policy loss  {policy_loss.item()}')
                     wandb.log({'policy_loss': policy_loss.item()})
                     policy_saver.checkpoint(policy, policy_optim)
@@ -433,8 +373,8 @@ def main(args):
                     value_saver.checkpoint(value, value_optim)
                     if value_saver.is_best(value_loss):
                         value_saver.save(value, 'best')
-                    if update_text:
-                        viz.update_sampled_values(value_sample)
+                    #if update_text:
+                    #    viz.update_sampled_values(value_sample)
 
             if args.dynamics_learnable:
                 T.learn(args, sample_train_buff, T_optim)
@@ -495,11 +435,11 @@ def main(args):
 
         if viz_cooldown():
             test_runner.episode(args, policy, render=True)
-            viz.plot_rewards_histogram(train_buff, R)
+            #viz.plot_rewards_histogram(train_buff, R)
             # viz.update_dynamics(test_buff, T)
-            viz.update_pcont(test_buff, pcont)
-            viz.update_value(test_buff, value)
-            env_viz.update(args, test_buff, policy, R, value, T, pcont)
+            #viz.update_pcont(test_buff, pcont)
+            #viz.update_value(test_buff, value)
+            #env_viz.update(args, test_buff, policy, R, value, T, pcont)
 
         converged = False
 

@@ -5,6 +5,9 @@
       <module fileurl="file://$PROJECT_DIR$/../cma-es/.idea/cma-es.iml" filepath="$PROJECT_DIR$/../cma-es/.idea/cma-es.iml" />
       <module fileurl="file://$PROJECT_DIR$/../iic/.idea/iic.iml" filepath="$PROJECT_DIR$/../iic/.idea/iic.iml" />
       <module fileurl="file://$PROJECT_DIR$/../keypoints/.idea/keypoints.iml" filepath="$PROJECT_DIR$/../keypoints/.idea/keypoints.iml" />
+      <module fileurl="file://$PROJECT_DIR$/../odeint/.idea/odeint.iml" filepath="$PROJECT_DIR$/../odeint/.idea/odeint.iml" />
+      <module fileurl="file://$PROJECT_DIR$/../step_funcs/.idea/step_funcs.iml" filepath="$PROJECT_DIR$/../step_funcs/.idea/step_funcs.iml" />
+      <module fileurl="file://$PROJECT_DIR$/../torchdiffeq/.idea/torchdiffeq.iml" filepath="$PROJECT_DIR$/../torchdiffeq/.idea/torchdiffeq.iml" />
       <module fileurl="file://$PROJECT_DIR$/.idea/world_model_2.iml" filepath="$PROJECT_DIR$/.idea/world_model_2.iml" />
     </modules>
   </component>

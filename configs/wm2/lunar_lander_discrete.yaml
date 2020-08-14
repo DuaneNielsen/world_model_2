@@ -22,6 +22,10 @@ policy:
   lr: 2e-3
   hidden_dims: [128]
   nonlin: 'nn.ELU'
+  clip: 2e-5
+
+explore:
+  epsilon: 0.05
 
 reward:
   learnable: False
