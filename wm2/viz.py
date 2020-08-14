@@ -15,6 +15,7 @@ import torch
 from torchdiffeq import odeint_adjoint as odeint
 
 from wm2.functional import multivariate_diag_gaussian, multivariate_gaussian
+from wm2.env.runner import EnvObserver
 
 
 def to_opencv_image(im):
@@ -267,7 +268,7 @@ class HistogramPanel:
 
 
 class PlotPanel:
-    def __init__(self, fig, panels, fig_index, label, length=1000):
+    def __init__(self, fig, panels, fig_index, label):
         self.fig = fig
         self.label = label
         self.plot = fig.add_subplot(*panels, fig_index, )
@@ -314,7 +315,101 @@ class LiveLine:
         self.dq = deque(maxlen=self.rew_live_length)
 
 
+class MultiLiveLine:
+    def __init__(self, fig, panels, fig_index, label, length=1000):
+        self.fig = fig
+        self.label = label
+        self.live = fig.add_subplot(*panels, fig_index, )
+        self.live.set_title(self.label)
+        self.rew_live_length = length
+        self.plots = {}
+
+    def update(self, **kwargs):
+        self.live.clear()
+        for name, value in kwargs.items():
+            if name not in self.plots:
+                self.plots[name] = deque(maxlen=self.rew_live_length)
+            self.plots[name].append(value)
+            y = np.array(self.plots[name])
+            self.live.plot(y, label=name)
+        self.live.relim()
+        self.live.autoscale_view()
+        self.live.set_title(self.label)
+        self.live.legend()
+
+    def reset(self):
+        self.live.clear()
+        self.dq = {}
+
+
 class Viz:
+    def __init__(self, args, figsize=(12, 16), panel_grid=(4, 2), window_title=None):
+        plt.ion()
+        self.fig = plt.figure(num=None, figsize=figsize, dpi=80, facecolor='w', edgecolor='k', )
+        plt.subplots_adjust(hspace=0.5)
+        if window_title is not None:
+            self.fig.canvas.set_window_title(window_title)
+        self.args = args
+        self.panel_grid = panel_grid
+        self.current_panel = 1
+        self.panels = {}
+
+    def next_panel(self):
+        current_panel = self.current_panel
+        self.current_panel += 1
+        return current_panel
+
+    def draw(self):
+        self.fig.canvas.draw()
+
+
+class VizBoard2(Viz, EnvObserver):
+    def __init__(self, args, figsize=(12, 8), panel_grid=(4, 2), window_title=None):
+        super().__init__(args, figsize=figsize, panel_grid=panel_grid, window_title=window_title)
+        self.panels['env_reward_sum'] = MultiLiveLine(self.fig, self.panel_grid, self.next_panel(), label='sum reward')
+        self.panels['env_reward_mean'] = MultiLiveLine(self.fig, self.panel_grid, self.next_panel(), label='mean reward')
+
+        self.panels['episode_len'] = MultiLiveLine(self.fig, self.panel_grid, self.next_panel(), label='episode length')
+        self.panels['policy_grad'] = LiveLine(self.fig, self.panel_grid, self.next_panel(), label='policy gradient')
+        self.returns = []
+        self.model_returns = []
+        self.episode_length = 0
+
+    def update_returns(self):
+        returns = np.array(self.returns)
+        if len(self.model_returns) > 0:
+            model_returns = np.array(self.model_returns)
+            self.panels['env_reward_sum'].update(model=model_returns.sum().item(), env=returns.sum().item())
+            self.panels['env_reward_mean'].update(model=model_returns.mean().item(), env=returns.mean().item())
+        else:
+            self.panels['env_reward_sum'].update(env=returns.sum().item())
+            self.panels['env_reward_mean'].update(env=returns.mean().item())
+
+    def sample_grad_norm(self, model, sample=0.01):
+        if random.random() < sample:
+            total_norm = 0
+            for p in model.parameters():
+                param_norm = p.grad.data.norm(2)
+                total_norm += param_norm.item() ** 2
+            total_norm = total_norm ** (1. / 2)
+            self.panels['policy_grad'].update(total_norm)
+            self.draw()
+
+    def step(self, state, action, reward, done, info, **kwargs):
+        self.episode_length += 1
+        self.returns.append(reward)
+        if 'model_reward' in kwargs:
+            self.model_returns.append(kwargs['model_reward'])
+
+    def done(self):
+        self.panels['episode_len'].update(length=self.episode_length)
+        self.episode_length = 0
+        self.update_returns()
+        self.draw()
+        self.returns = []
+
+
+class VizBoard:
     def __init__(self, args, window_title=None):
         plt.ion()
         self.fig = plt.figure(num=None, figsize=(24, 16), dpi=80, facecolor='w', edgecolor='k', )
