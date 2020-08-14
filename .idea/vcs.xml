@@ -4,6 +4,7 @@
     <mapping directory="$PROJECT_DIR$/../cma-es" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/../iic" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/../keypoints" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/../torchdiffeq" vcs="Git" />
     <mapping directory="$PROJECT_DIR$" vcs="Git" />
   </component>
 </project>

@@ -91,9 +91,11 @@ class LSTMTransitionModel(DreamTransitionModel):
 
 
 class ODEDynamicsModel(DreamTransitionModel):
-    def __init__(self, args):
+    def __init__(self, args, sample_func=None):
         super().__init__(args)
-        self.model = ForcedDynamics(state_size=args.state_dims, action_size=args.action_dims, nhidden=512)
+        self.model = ForcedDynamics(state_size=args.state_dims, action_size=args.action_dims,
+                                    nhidden=args.dynamics_hidden_dim,
+                                    sample_func=sample_func)
         self.state_labels = None
         self.action_labels = None
         self.viz = VizTransition(state_dims=args.state_dims, action_dims=args.action_dims, title=args.name)

@@ -1,5 +1,5 @@
 env: 'LunarLander-v3'
-connector: 'wm2.connectors.LunarLander_v3:LunarLanderDiscreteLSTMConnector'
+connector: 'wm2.connectors.LunarLander_v3:LunarLanderDiscreteODEConnector'
 seed_episodes: 5
 collect_interval: 10
 batch_size: 40
@@ -9,9 +9,9 @@ lam: 0.95
 exploration_noise: 0.25
 
 dynamics:
-  lr: 1e-3
-  layers: 1
-  hidden_dim: 512
+  lr: 1e-4
+  hidden_dim: 128
+  ode_method: 'rk4'
 
 value:
   lr: 1e-3

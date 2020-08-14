@@ -12,6 +12,7 @@ from env.LunarLander_v3 import dist_k, damp_k, stablilty_k, stablity_damp, impac
 from connectors.connector import EnvConnector, ODEEnvConnector, ActionPipeline
 from env.gym_viz import VizWrapper
 from wm2.models.models import DiscretePolicy
+from wm2.models.transition import ODEDynamicsModel
 
 
 class PhysicsStateOnly(gym.ObservationWrapper):
@@ -172,3 +173,12 @@ class LunarLanderDiscreteLSTMConnector(EnvConnector):
         policy = DiscretePolicy(layers=[args.state_dims, *args.policy_hidden_dims, args.action_dims], nonlin=args.policy_nonlin).to(args.device)
         policy_optim = Adam(policy.parameters(), lr=args.policy_lr)
         return policy, policy_optim
+
+
+class LunarLanderDiscreteODEConnector(LunarLanderDiscreteLSTMConnector):
+    def __init__(self, **kwargs):
+        super().__init__()
+
+    @staticmethod
+    def make_transition_model(args):
+        return ODEDynamicsModel(args, sample_func=LunarLanderDiscreteLSTMConnector.sample)

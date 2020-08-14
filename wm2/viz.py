@@ -407,6 +407,7 @@ class VizBoard2(Viz, EnvObserver):
         self.update_returns()
         self.draw()
         self.returns = []
+        self.model_returns = []
 
 
 class VizBoard:

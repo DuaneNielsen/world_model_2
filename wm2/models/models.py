@@ -22,7 +22,7 @@ class MLP(nn.Module):
             net += [nonlin()]
             in_dims = hidden
         last = nn.Linear(in_dims, layers[-1], bias=False)
-        nn.init.zeros_(last.weight)
+        #nn.init.zeros_(last.weight)
         net += [last]
 
         self.mlp = nn.Sequential(*net)
@@ -94,16 +94,38 @@ class StraightThroughOneHot(torch.autograd.Function):
         return grad
 
 
+class StraightThroughOneHotSample(torch.autograd.Function):
+    """
+    Estimating or Propagating Gradients Through Stochastic Neurons for Conditional Computation
+    https://arxiv.org/pdf/1308.3432.pdf
+
+    with sampling
+    """
+    @staticmethod
+    def forward(ctx, x):
+        head, tail = x.shape[:-1], x.shape[-1]
+        x = x.reshape(-1, tail).clone()
+        index = torch.multinomial(x, 1).squeeze()
+        #index = torch.argmax(x, dim=1)
+        x[:, :] = 0.0
+        x[torch.arange(x.shape[0]), index] = 1.0
+        x = x.reshape(*head, tail)
+        return x
+
+    @staticmethod
+    def backward(ctx, grad):
+        return grad
+
+
 class DiscretePolicy(nn.Module):
     def __init__(self, layers, nonlin=None):
         super().__init__()
         self.mu = MLP(layers, nonlin, dropout=0.0)
-        self.stoh = StraightThroughOneHot()
+        self.stoh = StraightThroughOneHotSample()
 
     def forward(self, state):
-        p = F.softmax(self.mu(state), dim=1)
+        p = F.softmax(self.mu(state), dim=-1)
         return self.stoh.apply(p)
-
 
 
 class TransitionModel(nn.Module):
@@ -216,13 +238,14 @@ class ForcedDynamics(nn.Module):
     L = length of trajectory, N is batch size, A is action space dimensions
     """
 
-    def __init__(self, state_size=6, action_size=2, nhidden=512):
+    def __init__(self, state_size=6, action_size=2, nhidden=512, sample_func=None):
         super().__init__()
         self.dynamics = Dynamics(state_size=state_size, action_size=action_size, nhidden=nhidden)
         self.nfe = 0
         self.policy = None
         self.mode = 'learn_dynamics'
         self.h = None
+        self.sample_func = sample_func
 
     def forward(self, t, state):
 
@@ -233,7 +256,10 @@ class ForcedDynamics(nn.Module):
             index = index.clamp(0, self.h.shape[0] - 1)
             actions = self.h[index]
         else:
-            actions = self.policy(state).rsample()
+            if self.sample_func is not None:
+                actions = self.sample_func(self.policy(state))
+            else:
+                actions = self.policy(state).rsample()
 
         controlled = torch.cat([state, actions], dim=1)
         dstate = self.dynamics(controlled)
