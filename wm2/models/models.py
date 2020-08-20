@@ -267,23 +267,23 @@ class ForcedDynamics(nn.Module):
 
 
 class DreamModel(nn.Module):
-    def __init__(self, name, *args, **kwargs):
+    def __init__(self, name, model, *args, **kwargs):
         super().__init__()
-        self.model = None
         self.saver = wm2.utils.SaveLoad(name)
+        self.model = model
+
+    def forward(self, *args, **kwargs):
+        self.model.forward(*args, **kwargs)
 
     def learn(self, args, buffer, optim):
         pass
-
-    def forward(self, *args, **kwargs):
-        return self.model.forward(*args, **kwargs)
 
     def save(self, suffix, **kwargs):
         """ saves model state dict as a dict['model'] to a file with <model_name>_suffix.pt"""
         self.saver.save(self, suffix, **kwargs)
 
     @staticmethod
-    def load(self, wandb_run_dir, label, suffix):
+    def load(wandb_run_dir, label, suffix):
         return wm2.utils.SaveLoad.load(wandb_run_dir, label, suffix)
 
     def checkpoint(self, optimizer):
@@ -297,4 +297,10 @@ class DreamModel(nn.Module):
 
 class DreamTransitionModel(DreamModel):
     def imagine(self, args, trajectory, policy, action_pipeline):
+        """
+        predicts args.horizon steps ahead using T and initial conditions sampled from exp buffer
+        :param args, configuration namespace, includes args.horizon, the expented return length
+        :param trajectory: trajectory namespace from pad_collate_2
+        :return: H, N, (state): imagined trajectory of states
+        """
         pass

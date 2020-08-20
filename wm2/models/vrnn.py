@@ -73,6 +73,8 @@ class VRNN(nn.Module):
         # recurrence
         self.rnn = nn.GRU(h_dim + h_dim, h_dim, n_layers, bias)
 
+        self.dummy_param = nn.Parameter(torch.empty(0))
+
     def forward(self, x, c, loss_mask=None):
 
         all_enc_mean, all_enc_std = [], []
@@ -112,9 +114,14 @@ class VRNN(nn.Module):
             _, h = self.rnn(torch.cat([phi_x_t, phi_z_t], 1).unsqueeze(0), h)
 
             # computing losses
-            kld_loss += self._kld_gauss(enc_mean_t, enc_std_t, prior_mean_t, prior_std_t)
+            #kld_loss += self._kld_gauss(enc_mean_t, enc_std_t, prior_mean_t, prior_std_t)
             # nll_loss += self._nll_gauss(dec_mean_t, dec_std_t, x[t])
-            nll_loss += self._nll_bernoulli(dec_mean_t, x[t])
+            if loss_mask is not None:
+                kld_loss += torch.sum(self._kld_gauss(enc_mean_t, enc_std_t, prior_mean_t, prior_std_t) * loss_mask[t])
+                nll_loss += torch.sum(self._nll_bernoulli(dec_mean_t, x[t]) * loss_mask[t])
+            else:
+                nll_loss += torch.sum(self._nll_bernoulli(dec_mean_t, x[t]))
+                kld_loss += torch.sum(self._kld_gauss(enc_mean_t, enc_std_t, prior_mean_t, prior_std_t))
             # nll_loss += ((dec_mean_t - x[t]) ** 2).mean() / 2.0
 
             all_enc_std.append(enc_std_t)
@@ -126,12 +133,22 @@ class VRNN(nn.Module):
                (all_enc_mean, all_enc_std), \
                (all_dec_mean, all_dec_std)
 
-    def sample(self, seq_len):
+    @property
+    def device(self):
+        return self.dummy_param.device
 
-        sample = torch.zeros(seq_len, self.x_dim)
+    def sample(self, initial_x,  policy, action_pipeline, seq_len):
 
-        h = Variable(torch.zeros(self.n_layers, 1, self.h_dim)).to(self.device)
-        for t in range(seq_len):
+        sample = torch.zeros(seq_len, initial_x.shape[0], self.x_out_dim, device=self.device)
+
+        #h = Variable(torch.zeros(self.n_layers, 1, self.h_dim, device=self.device))
+
+        action = policy(initial_x)
+
+        h = self.phi_x(torch.cat((initial_x, action), dim=1)).unsqueeze(0)
+        sample[0] = initial_x
+
+        for t in range(1, seq_len-1):
             # prior
             prior_t = self.prior(h[-1])
             prior_mean_t = self.prior_mean(prior_t)
@@ -146,7 +163,9 @@ class VRNN(nn.Module):
             dec_mean_t = self.dec_mean(dec_t)
             # dec_std_t = self.dec_std(dec_t)
 
-            phi_x_t = self.phi_x(dec_mean_t)
+            action = action_pipeline.sample(policy(dec_mean_t))
+
+            phi_x_t = self.phi_x(torch.cat((dec_mean_t, action), dim=1))
 
             # recurrence
             _, h = self.rnn(torch.cat([phi_x_t, phi_z_t], 1).unsqueeze(0), h)
@@ -172,10 +191,10 @@ class VRNN(nn.Module):
         """Using std to compute KLD"""
 
         kld_element = (2 * torch.log(std_2) - 2 * torch.log(std_1) + (std_1.pow(2) + (mean_1 - mean_2).pow(2)) / std_2.pow(2) - 1)
-        return 0.5 * torch.sum(kld_element)
+        return 0.5 * kld_element
 
     def _nll_bernoulli(self, theta, x):
-        return - torch.sum(x * torch.log(theta + eps) + (1 - x) * torch.log(1 - theta + eps))
+        return - (x * torch.log(theta + eps) + (1 - x) * torch.log(1 - theta + eps))
 
     def _nll_gauss(self, mean, std, x):
         pass
